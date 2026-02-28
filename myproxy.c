@@ -1,5 +1,4 @@
 #ifdef _WIN32
-#include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #define close(fd) closesocket(fd)
@@ -23,7 +22,6 @@ typedef int socklen_t;
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #define BUF_SIZE 1024 * 32
 
@@ -70,7 +68,7 @@ struct conn_pair {
     broker_t *fwd;
     broker_t *bwd;
     int done;
-    struct timespec start_time;
+    ev_tstamp start_time;
 };
 
 #ifdef _WIN32
@@ -106,10 +104,8 @@ static void broker_done(broker_t *b)
     if (++p->done != 2)
         return;
 
-    struct timespec now;
-    clock_gettime(CLOCK_REALTIME, &now);
-    double duration =
-        (now.tv_sec - p->start_time.tv_sec) + (now.tv_nsec - p->start_time.tv_nsec) / 1e9;
+    ev_tstamp now = ev_time();
+    double duration = now - p->start_time;
 
     char fwd_buf[32], fwd_rate_buf[32];
     char bwd_buf[32], bwd_rate_buf[32];
@@ -250,7 +246,7 @@ static void conn_pair_new(struct ev_loop *loop, int client_fd, int backend_fd,
     p->loop = loop;
     p->client_fd = client_fd;
     p->backend_fd = backend_fd;
-    clock_gettime(CLOCK_REALTIME, &p->start_time);
+    p->start_time = ev_time();
 
     // [C] = client, [B] = backend
     char fwd_from_label[48], fwd_to_label[48];
