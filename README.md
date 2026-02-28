@@ -1,5 +1,7 @@
 # myproxy
 
+[中文](README_cn.md) | English
+
 Lightweight TCP proxy with extremely low resource footprint.
 
 ## Resource Usage
