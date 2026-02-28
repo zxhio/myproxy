@@ -1,16 +1,29 @@
+#ifdef _WIN32
+#include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#define close(fd) closesocket(fd)
+#define read(fd, buf, len) recv(fd, buf, len, 0)
+#define write(fd, buf, len) send(fd, buf, len, 0)
+#define SHUT_RD SD_RECEIVE
+#define SHUT_WR SD_SEND
+#define SHUT_RDWR SD_BOTH
+typedef int socklen_t;
+#else
 #include <arpa/inet.h>
 #include <errno.h>
-#include <ev.h>
 #include <fcntl.h>
+#include <sys/signal.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
+#include <ev.h>
 #include <getopt.h>
-#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/signal.h>
-#include <sys/socket.h>
 #include <time.h>
-#include <unistd.h>
 
 #define BUF_SIZE 1024 * 32
 
@@ -60,7 +73,15 @@ struct conn_pair {
     struct timespec start_time;
 };
 
+#ifdef _WIN32
+static void set_nonblock(int fd)
+{
+    u_long mode = 1;
+    ioctlsocket(fd, FIONBIO, &mode);
+}
+#else
 static void set_nonblock(int fd) { fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK); }
+#endif
 
 static char *format_size(char *buf, size_t buf_len, size_t bytes)
 {
@@ -80,7 +101,7 @@ static void broker_done(broker_t *b)
     conn_pair_t *p = b->pair;
     ev_io_stop(p->loop, &b->rw);
     ev_io_stop(p->loop, &b->ww);
-    LOG_TRACE("%s → %s: done", b->from_label, b->to_label);
+    LOG_TRACE("%s -> %s: done", b->from_label, b->to_label);
 
     if (++p->done != 2)
         return;
@@ -93,7 +114,7 @@ static void broker_done(broker_t *b)
     char fwd_buf[32], fwd_rate_buf[32];
     char bwd_buf[32], bwd_rate_buf[32];
 
-    LOG_INFO("Connection %s ↔ %s closed (%.3fs)", b->from_label, b->to_label, duration);
+    LOG_INFO("Connection %s <-> %s closed (%.3fs)", b->from_label, b->to_label, duration);
     LOG_DEBUG(
         "  forward: %s (%s/s), backward: %s (%s/s)",
         format_size(fwd_buf, sizeof(fwd_buf), p->fwd->total_write),
@@ -110,6 +131,7 @@ static void broker_done(broker_t *b)
 static void on_writable(struct ev_loop *loop, ev_io *w, int revents)
 {
     broker_t *b = (broker_t *)w->data;
+    (void)loop;
     (void)revents;
 
     if (b->sent == b->len) {
@@ -129,7 +151,7 @@ static void on_writable(struct ev_loop *loop, ev_io *w, int revents)
         b->total_write += n;
         b->sent += n;
         char size_buf[32];
-        LOG_TRACE("%s → %s, write %zd bytes (total: %s)", b->to_label, b->from_label, n,
+        LOG_TRACE("%s -> %s, write %zd bytes (total: %s)", b->to_label, b->from_label, n,
                   format_size(size_buf, sizeof(size_buf), b->total_write));
 
         if (b->sent == b->len) {
@@ -143,7 +165,7 @@ static void on_writable(struct ev_loop *loop, ev_io *w, int revents)
             }
         }
     } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-        LOG_ERROR("%s → %s, write error: %s", b->to_label, b->from_label, strerror(errno));
+        LOG_ERROR("%s -> %s, write error: %s", b->to_label, b->from_label, strerror(errno));
         shutdown(b->from_fd, SHUT_RD);
         shutdown(b->to_fd, SHUT_WR);
         ev_io_stop(EV_A_ & b->ww);
@@ -155,6 +177,7 @@ static void on_writable(struct ev_loop *loop, ev_io *w, int revents)
 static void on_readable(struct ev_loop *loop, ev_io *w, int revents)
 {
     broker_t *b = (broker_t *)w->data;
+    (void)loop;
     (void)revents;
 
     // Prevent read returning 0 and being mistaken for EOF when buffer is full
@@ -168,7 +191,7 @@ static void on_readable(struct ev_loop *loop, ev_io *w, int revents)
         b->total_read += n;
         b->len += n;
         char size_buf[32];
-        LOG_TRACE("%s → %s, read %zd bytes (total: %s)", b->from_label, b->to_label, n,
+        LOG_TRACE("%s -> %s, read %zd bytes (total: %s)", b->from_label, b->to_label, n,
                   format_size(size_buf, sizeof(size_buf), b->total_read));
 
         if (b->len == BUF_SIZE)
@@ -178,13 +201,13 @@ static void on_readable(struct ev_loop *loop, ev_io *w, int revents)
     } else if (n == 0) {
         b->eof = 1;
         ev_io_stop(EV_A_ & b->rw);
-        LOG_TRACE("%s → %s, EOF (buf:%zu/%zu)", b->from_label, b->to_label, b->sent, b->len);
+        LOG_TRACE("%s -> %s, EOF (buf:%zu/%zu)", b->from_label, b->to_label, b->sent, b->len);
         if (b->sent == b->len) {
             shutdown(b->to_fd, SHUT_WR);
             broker_done(b);
         }
     } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-        LOG_ERROR("%s → %s, read error: %s", b->from_label, b->to_label, strerror(errno));
+        LOG_ERROR("%s -> %s, read error: %s", b->from_label, b->to_label, strerror(errno));
         shutdown(b->from_fd, SHUT_RD);
         shutdown(b->to_fd, SHUT_WR);
         ev_io_stop(EV_A_ & b->rw);
@@ -215,7 +238,7 @@ static broker_t *broker_new(conn_pair_t *p, int to_fd, int from_fd, const char *
     return b;
 }
 
-// conn_pair_new - Establish a bidirectional data tunnel between client and backend.
+// conn_pair_new - Create bidirectional proxy connection between client and backend
 static void conn_pair_new(struct ev_loop *loop, int client_fd, int backend_fd,
                           const char *client_ip, int client_port, const char *backend_ip,
                           int backend_port)
@@ -269,9 +292,9 @@ typedef struct {
 
 static void on_accept(struct ev_loop *loop, ev_io *w, int revents)
 {
+    server_t *s = (server_t *)w->data;
     (void)loop;
     (void)revents;
-    server_t *s = (server_t *)w->data;
 
     struct sockaddr_in client_addr;
     socklen_t len = sizeof(client_addr);
@@ -361,7 +384,11 @@ static void server_free(server_t *s)
     }
 }
 
+#ifdef _WIN32
+static void setup_signals(void) { /* Windows doesn't have SIGPIPE */ }
+#else
 static void setup_signals(void) { signal(SIGPIPE, SIG_IGN); }
+#endif
 
 static int parse_addr(const char *addr_str, char *host, size_t host_buf_len, int *port)
 {
@@ -403,8 +430,7 @@ static void print_usage(const char *prog)
     printf("\nOptions:\n");
     printf("  -l, --listen-addr ADDR    Listen address (e.g., 0.0.0.0:8080)\n");
     printf("  -b, --backend-addr ADDR   Backend address (e.g., 127.0.0.1:8000)\n");
-    printf("  -v, --verbose             Show connection details and traffic "
-           "stats\n");
+    printf("  -v, --verbose             Show connection details and traffic stats\n");
     printf("  -vv                       Show detailed read/write operations\n");
     printf("  -V, --version             Show version information\n");
     printf("  -h, --help                Show this help message\n");
@@ -415,6 +441,14 @@ static void print_usage(const char *prog)
 
 int main(int argc, char *argv[])
 {
+#ifdef _WIN32
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        fprintf(stderr, "WSAStartup failed\n");
+        return 1;
+    }
+#endif
+
     static struct option long_options[] = {{"listen-addr", required_argument, 0, 'l'},
                                            {"backend-addr", required_argument, 0, 'b'},
                                            {"verbose", no_argument, 0, 'v'},
@@ -427,19 +461,22 @@ int main(int argc, char *argv[])
     char backend_addr[24] = {0};
     int backend_port = 0;
     int opt;
+    int ret = 0;
 
     while ((opt = getopt_long(argc, argv, "l:b:vVh", long_options, NULL)) != -1) {
         switch (opt) {
         case 'l':
             if (parse_addr(optarg, listen_addr, sizeof(listen_addr), &listen_port) < 0) {
                 print_usage(argv[0]);
-                return 1;
+                ret = 1;
+                goto cleanup;
             }
             break;
         case 'b':
             if (parse_addr(optarg, backend_addr, sizeof(backend_addr), &backend_port) < 0) {
                 print_usage(argv[0]);
-                return 1;
+                ret = 1;
+                goto cleanup;
             }
             break;
         case 'v':
@@ -448,20 +485,24 @@ int main(int argc, char *argv[])
             break;
         case 'V':
             print_version(argv[0]);
-            return 0;
+            ret = 0;
+            goto cleanup;
         case 'h':
             print_usage(argv[0]);
-            return 0;
+            ret = 0;
+            goto cleanup;
         default:
             print_usage(argv[0]);
-            return 1;
+            ret = 1;
+            goto cleanup;
         }
     }
 
     if (listen_port == 0 || backend_port == 0) {
         LOG_ERROR("Both --listen-addr and --backend-addr are required");
         print_usage(argv[0]);
-        return 1;
+        ret = 1;
+        goto cleanup;
     }
 
     g_cfg.listen_addr = listen_addr;
@@ -474,16 +515,23 @@ int main(int argc, char *argv[])
     struct ev_loop *loop = ev_default_loop(0);
     if (!loop) {
         LOG_ERROR("Failed to create event loop");
-        return 1;
+        ret = 1;
+        goto cleanup;
     }
 
     server_t *s = server_new(loop, listen_addr, listen_port);
-    if (!s)
-        return 1;
+    if (!s) {
+        ret = 1;
+        goto cleanup;
+    }
 
     ev_run(loop, 0);
     ev_loop_destroy(loop);
     server_free(s);
 
-    return 0;
+cleanup:
+#ifdef _WIN32
+    WSACleanup();
+#endif
+    return ret;
 }
