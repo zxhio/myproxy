@@ -23,41 +23,87 @@ jobs:
         run: echo "VERSION=${GITHUB_REF##*/}" >> "$GITHUB_OUTPUT"
 
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     needs: get-build-info
     env:
       VERSION: ${{ needs.get-build-info.outputs.version }}
+
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-linux
+          - os: ubuntu-latest
+            target: aarch64-linux
+          - os: macos-latest
+            target: x86_64-macos
+          - os: macos-latest
+            target: aarch64-macos
+          - os: windows-latest
+            target: x86_64-windows
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Install build dependencies
+      - name: Install dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake gcc
+
+      - name: Install ARM cross-compiler (Ubuntu)
+        if: matrix.os == 'ubuntu-latest' && matrix.target == 'aarch64-linux'
+        run: |
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Install dependencies (macOS)
+        if: startsWith(matrix.os, 'macos-')
+        run: |
+          brew install cmake
 
       - name: Build myproxy
         run: |
           mkdir build
           cd build
-          cmake ..
-          make
+          cmake .. ${CMAKE_ARGS}
+          cmake --build .
 
-      - name: Pack
-        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          CMAKE_ARGS: >-
+            ${{ matrix.target == 'aarch64-linux' && '-DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64' || '' }}
+
+      - name: Pack (Unix)
+        if: startsWith(github.ref, 'refs/tags/') && matrix.os != 'windows-latest'
         run: |
           cd build
-          tar czf myproxy-linux-amd64.tar.gz myproxy
-          mv myproxy-linux-amd64.tar.gz ..
+          tar czf myproxy-${{ matrix.target }}.tar.gz myproxy
+          mv myproxy-${{ matrix.target }}.tar.gz ..
 
-      - name: Upload Release Assets
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Pack (Windows)
+        if: startsWith(github.ref, 'refs/tags/') && matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          cd build
+          7z a myproxy-${{ matrix.target }}.zip myproxy.exe
+          mv myproxy-${{ matrix.target }}.zip ..
+
+      - name: Upload Release Assets (Unix)
+        if: startsWith(github.ref, 'refs/tags/') && matrix.os != 'windows-latest'
         uses: svenstaro/upload-release-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag: ${{ needs.get-build-info.outputs.version }}
-          file: myproxy-*.tar.gz
+          file: myproxy-${{ matrix.target }}.tar.gz
           overwrite: true
-          file_glob: true
+
+      - name: Upload Release Assets (Windows)
+        if: startsWith(github.ref, 'refs/tags/') && matrix.os == 'windows-latest'
+        uses: svenstaro/upload-release-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag: ${{ needs.get-build-info.outputs.version }}
+          file: myproxy-${{ matrix.target }}.zip
+          overwrite: true
