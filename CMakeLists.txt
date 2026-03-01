@@ -4,13 +4,8 @@ project(myproxy VERSION 1.0.0 LANGUAGES C)
 set(CMAKE_C_STANDARD 11)
 
 # Compiler flags
-if(MSVC)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /W4 /O2")
-else()
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -O2")
-    # libev macros trigger strict-aliasing warnings, disable them
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-strict-aliasing")
-endif()
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -O2")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-strict-aliasing")
 
 # Static linking (Linux only)
 if(UNIX AND NOT APPLE)
@@ -25,16 +20,7 @@ add_library(ev STATIC
 target_include_directories(ev PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third-party/libev-4.33)
 
 # Platform-specific libev macros
-if(WIN32)
-    target_compile_definitions(ev PUBLIC
-        EV_STANDALONE=1
-        EV_USE_SELECT=1
-        EV_USE_POLL=1
-        EV_USE_WIN32=1
-    )
-    # Link winsock on Windows
-    target_link_libraries(ev PUBLIC ws2_32)
-elseif(APPLE)
+if(APPLE)
     target_compile_definitions(ev PUBLIC
         EV_STANDALONE=1
         EV_USE_KQUEUE=1
@@ -60,9 +46,7 @@ else() # Linux
 endif()
 
 # Suppress warnings from libev
-if(NOT MSVC)
-    target_compile_options(ev PRIVATE -w)
-endif()
+target_compile_options(ev PRIVATE -w)
 
 # myproxy executable
 add_executable(myproxy myproxy.c)
