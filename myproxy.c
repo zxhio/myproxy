@@ -14,6 +14,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+// Version info defaults (for IDE static analysis)
+#ifndef MYPROXY_VERSION
+#define MYPROXY_VERSION "0.0.1"
+#endif
+#ifndef MYPROXY_BUILD_DATE
+#define MYPROXY_BUILD_DATE "unknown"
+#endif
+#ifndef MYPROXY_COMMIT_HASH
+#define MYPROXY_COMMIT_HASH "unknown"
+#endif
+
 #define BUF_SIZE (1024 * 32)
 #define SPLICE_SIZE (1024 * 128)
 #define PIPE_SIZE (1024 * 1024)
@@ -475,12 +486,9 @@ static int parse_addr(const char *addr_str, char *host, size_t host_buf_len, int
     return 0;
 }
 
-#define VERSION "1.0.0"
-
 static void print_version(const char *prog)
 {
-    printf("%s: Version %s\n", prog, VERSION);
-    printf("Built with libev %d.%d\n", EV_VERSION_MAJOR, EV_VERSION_MINOR);
+    printf("%s %s (%s %s)\n", prog, MYPROXY_VERSION, MYPROXY_COMMIT_HASH, MYPROXY_BUILD_DATE);
 }
 
 static void print_usage(const char *prog)

@@ -3,6 +3,30 @@ project(myproxy VERSION 1.0.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 
+# Get version from environment variable or default
+if(DEFINED ENV{VERSION})
+    set(PROJECT_VERSION $ENV{VERSION})
+else()
+    set(PROJECT_VERSION "0.0.1")
+endif()
+
+# Get build date
+string(TIMESTAMP BUILD_DATE "%Y-%m-%d")
+if(NOT BUILD_DATE)
+    set(BUILD_DATE "unknown")
+endif()
+
+# Get git commit hash (short)
+execute_process(
+    COMMAND git log -1 --format=%h
+    OUTPUT_VARIABLE GIT_COMMIT_HASH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT GIT_COMMIT_HASH)
+    set(GIT_COMMIT_HASH "unknown")
+endif()
+
 # Compiler flags
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Werror -O2")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-strict-aliasing")
@@ -51,6 +75,11 @@ target_compile_options(ev PRIVATE -w)
 # myproxy executable
 add_executable(myproxy myproxy.c)
 target_link_libraries(myproxy PRIVATE ev)
+target_compile_definitions(myproxy PRIVATE
+    MYPROXY_VERSION="${PROJECT_VERSION}"
+    MYPROXY_BUILD_DATE="${BUILD_DATE}"
+    MYPROXY_COMMIT_HASH="${GIT_COMMIT_HASH}"
+)
 
 # echo_server for testing
 add_executable(echo_server tests/echo_server.c)
