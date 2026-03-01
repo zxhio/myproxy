@@ -92,7 +92,7 @@ static void broker_done(broker_t *b)
     char fwd_buf[32], fwd_rate_buf[32];
     char bwd_buf[32], bwd_rate_buf[32];
 
-    LOG_INFO("Connection %s <-> %s closed (%.3fs)", b->from_label, b->to_label, duration);
+    LOG_DEBUG("Connection %s <-> %s closed (%.3fs)", b->from_label, b->to_label, duration);
     LOG_DEBUG(
         "  forward: %s (%s/s), backward: %s (%s/s)",
         format_size(fwd_buf, sizeof(fwd_buf), p->fwd->total_write),
@@ -247,7 +247,7 @@ static void conn_pair_new(struct ev_loop *loop, int client_fd, const char *clien
         return;
     }
 
-    LOG_INFO("Connected to %s:%d", backend_ip, backend_port);
+    LOG_DEBUG("Connected to %s:%d", backend_ip, backend_port);
 
     conn_pair_t *p = (conn_pair_t *)calloc(1, sizeof(*p));
     if (!p) {
@@ -315,7 +315,7 @@ static void on_accept(struct ev_loop *loop, ev_io *w, int revents)
     char client_ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
     int client_port = ntohs(client_addr.sin_port);
-    LOG_INFO("Connection from %s:%d", client_ip, client_port);
+    LOG_DEBUG("Connection from %s:%d", client_ip, client_port);
 
     conn_pair_new(s->loop, client, client_ip, client_port, g_cfg.backend_ip, g_cfg.backend_port);
 }
@@ -348,8 +348,8 @@ static server_t *server_new(struct ev_loop *loop, const char *addr, int port)
     s->accept_w.data = s;
     ev_io_start(loop, &s->accept_w);
 
-    LOG_INFO("Listening on %s:%d", addr, port);
-    LOG_INFO("Forwarding to %s:%d", g_cfg.backend_ip, g_cfg.backend_port);
+    LOG_DEBUG("Listening on %s:%d", addr, port);
+    LOG_DEBUG("Forwarding to %s:%d", g_cfg.backend_ip, g_cfg.backend_port);
 
     return s;
 }
