@@ -68,4 +68,8 @@ endif()
 add_executable(myproxy myproxy.c)
 target_link_libraries(myproxy PRIVATE ev)
 
+# echo_server for testing
+add_executable(echo_server tests/echo_server.c)
+target_link_libraries(echo_server PRIVATE ev)
+
 install(TARGETS myproxy DESTINATION bin)
