@@ -4,7 +4,7 @@ project(myproxy VERSION 1.0.0 LANGUAGES C)
 set(CMAKE_C_STANDARD 11)
 
 # Compiler flags
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -O2")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Werror -O2")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-strict-aliasing")
 
 # Static linking (Linux only)
@@ -55,5 +55,8 @@ target_link_libraries(myproxy PRIVATE ev)
 # echo_server for testing
 add_executable(echo_server tests/echo_server.c)
 target_link_libraries(echo_server PRIVATE ev)
+
+# Strip debug symbols from binaries
+add_custom_command(TARGET myproxy POST_BUILD COMMAND ${CMAKE_STRIP} $<TARGET_FILE:myproxy>)
 
 install(TARGETS myproxy DESTINATION bin)
