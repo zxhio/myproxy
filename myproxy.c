@@ -1,6 +1,9 @@
+#define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/tcp.h>
+#include <sys/ioctl.h>
 #include <sys/signal.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -11,7 +14,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define BUF_SIZE 1024 * 32
+#define BUF_SIZE (1024 * 32)
+#define SPLICE_SIZE (1024 * 128)
+#define PIPE_SIZE (1024 * 1024)
+
+#if defined(__linux__)
+#define USE_SPLICE
+#endif
 
 typedef struct {
     int verbose;
@@ -28,10 +37,25 @@ static config_t g_cfg = {0, NULL, 0, NULL, 0};
         if (g_cfg.verbose >= level)                                                                \
             printf(fmt "\n", ##__VA_ARGS__);                                                       \
     } while (0)
-#define LOG_DEBUG(fmt, ...) LOG(1, fmt, ##__VA_ARGS__) // -v: connection details and traffic stats
-#define LOG_TRACE(fmt, ...) LOG(2, fmt, ##__VA_ARGS__) // -vv: detailed read/write operations
+#define LOG_DEBUG(fmt, ...) LOG(1, fmt, ##__VA_ARGS__)
+#define LOG_TRACE(fmt, ...) LOG(2, fmt, ##__VA_ARGS__)
 #define LOG_INFO(fmt, ...) printf(fmt "\n", ##__VA_ARGS__)
 #define LOG_ERROR(fmt, ...) fprintf(stderr, fmt "\n", ##__VA_ARGS__)
+
+static char *format_size(char *buf, size_t buf_len, size_t bytes)
+{
+    if (bytes < 1024)
+        snprintf(buf, buf_len, "%zu B", bytes);
+    else if (bytes < 1024 * 1024)
+        snprintf(buf, buf_len, "%.2f KiB", bytes / 1024.0);
+    else if (bytes < 1024 * 1024 * 1024)
+        snprintf(buf, buf_len, "%.2f MiB", bytes / (1024.0 * 1024));
+    else if (bytes < 1024ULL * 1024 * 1024 * 1024)
+        snprintf(buf, buf_len, "%.2f GiB", bytes / (1024.0 * 1024 * 1024));
+    else
+        snprintf(buf, buf_len, "%.2f TiB", bytes / (1024.0 * 1024 * 1024 * 1024));
+    return buf;
+}
 
 typedef struct conn_pair conn_pair_t;
 
@@ -44,7 +68,11 @@ typedef struct {
     ev_io rw;
     ev_io ww;
     int eof;
+#ifdef USE_SPLICE
+    int pipe[2];
+#else
     unsigned char buf[BUF_SIZE];
+#endif
     size_t len;
     size_t sent;
     size_t total_read;
@@ -63,17 +91,48 @@ struct conn_pair {
 
 static void set_nonblock(int fd) { fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK); }
 
-static char *format_size(char *buf, size_t buf_len, size_t bytes)
+#ifdef USE_SPLICE
+static int broker_pipe_new(broker_t *b)
 {
-    if (bytes < 1024)
-        snprintf(buf, buf_len, "%zu B", bytes);
-    else if (bytes < 1024 * 1024)
-        snprintf(buf, buf_len, "%.2f KiB", bytes / 1024.0);
-    else if (bytes < 1024 * 1024 * 1024)
-        snprintf(buf, buf_len, "%.2f MiB", bytes / (1024.0 * 1024));
-    else
-        snprintf(buf, buf_len, "%.2f GiB", bytes / (1024.0 * 1024 * 1024));
-    return buf;
+    b->pipe[0] = b->pipe[1] = -1;
+    if (pipe(b->pipe) < 0)
+        return -1;
+#ifdef F_SETPIPE_SZ
+    fcntl(b->pipe[0], F_SETPIPE_SZ, PIPE_SIZE);
+    fcntl(b->pipe[1], F_SETPIPE_SZ, PIPE_SIZE);
+#endif
+    set_nonblock(b->pipe[0]);
+    set_nonblock(b->pipe[1]);
+    return 0;
+}
+#endif
+
+static inline ssize_t broker_read(broker_t *b)
+{
+#ifdef USE_SPLICE
+    return splice(b->from_fd, NULL, b->pipe[1], NULL, SPLICE_SIZE, SPLICE_F_NONBLOCK);
+#else
+    return read(b->from_fd, b->buf + b->len, BUF_SIZE - b->len);
+#endif
+}
+
+static inline ssize_t broker_write(broker_t *b)
+{
+#ifdef USE_SPLICE
+    return splice(b->pipe[0], NULL, b->to_fd, NULL, b->len - b->sent, SPLICE_F_NONBLOCK);
+#else
+    return write(b->to_fd, b->buf + b->sent, b->len - b->sent);
+#endif
+}
+
+static inline int broker_buf_full(broker_t *b)
+{
+#ifdef USE_SPLICE
+    (void)b;
+    return 0;
+#else
+    return b->len == BUF_SIZE;
+#endif
 }
 
 static void broker_done(broker_t *b)
@@ -100,6 +159,12 @@ static void broker_done(broker_t *b)
         format_size(bwd_buf, sizeof(bwd_buf), p->bwd->total_write),
         format_size(bwd_rate_buf, sizeof(bwd_rate_buf), (size_t)(p->bwd->total_write / duration)));
 
+#ifdef USE_SPLICE
+    close(p->fwd->pipe[0]);
+    close(p->fwd->pipe[1]);
+    close(p->bwd->pipe[0]);
+    close(p->bwd->pipe[1]);
+#endif
     close(p->client_fd);
     close(p->backend_fd);
     free(p->fwd);
@@ -107,7 +172,7 @@ static void broker_done(broker_t *b)
     free(p);
 }
 
-static void on_writable(struct ev_loop *loop, ev_io *w, int revents)
+static void broker_on_writable(struct ev_loop *loop, ev_io *w, int revents)
 {
     (void)loop;
     (void)revents;
@@ -116,17 +181,17 @@ static void on_writable(struct ev_loop *loop, ev_io *w, int revents)
 
     if (b->sent == b->len) {
         b->len = b->sent = 0;
-        ev_io_stop(EV_A_ & b->ww);
+        ev_io_stop(loop, &b->ww);
         if (b->eof) {
             shutdown(b->to_fd, SHUT_WR);
             broker_done(b);
         } else if (!ev_is_active(&b->rw)) {
-            ev_io_start(EV_A_ & b->rw);
+            ev_io_start(loop, &b->rw);
         }
         return;
     }
 
-    ssize_t n = write(b->to_fd, b->buf + b->sent, b->len - b->sent);
+    ssize_t n = broker_write(b);
     if (n > 0) {
         b->total_write += n;
         b->sent += n;
@@ -136,25 +201,25 @@ static void on_writable(struct ev_loop *loop, ev_io *w, int revents)
 
         if (b->sent == b->len) {
             b->len = b->sent = 0;
-            ev_io_stop(EV_A_ & b->ww);
+            ev_io_stop(loop, &b->ww);
             if (b->eof) {
                 shutdown(b->to_fd, SHUT_WR);
                 broker_done(b);
             } else if (!ev_is_active(&b->rw)) {
-                ev_io_start(EV_A_ & b->rw);
+                ev_io_start(loop, &b->rw);
             }
         }
     } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
         LOG_ERROR("%s -> %s, write error: %s", b->to_label, b->from_label, strerror(errno));
         shutdown(b->from_fd, SHUT_RD);
         shutdown(b->to_fd, SHUT_WR);
-        ev_io_stop(EV_A_ & b->ww);
-        ev_io_stop(EV_A_ & b->rw);
+        ev_io_stop(loop, &b->ww);
+        ev_io_stop(loop, &b->rw);
         broker_done(b);
     }
 }
 
-static void on_readable(struct ev_loop *loop, ev_io *w, int revents)
+static void broker_on_readable(struct ev_loop *loop, ev_io *w, int revents)
 {
     (void)loop;
     (void)revents;
@@ -162,12 +227,12 @@ static void on_readable(struct ev_loop *loop, ev_io *w, int revents)
     broker_t *b = (broker_t *)w->data;
 
     // Prevent read returning 0 and being mistaken for EOF when buffer is full
-    if (b->len == BUF_SIZE) {
-        ev_io_stop(EV_A_ & b->rw);
+    if (broker_buf_full(b)) {
+        ev_io_stop(loop, &b->rw);
         return;
     }
 
-    ssize_t n = read(b->from_fd, b->buf + b->len, BUF_SIZE - b->len);
+    ssize_t n = broker_read(b);
     if (n > 0) {
         b->total_read += n;
         b->len += n;
@@ -175,13 +240,13 @@ static void on_readable(struct ev_loop *loop, ev_io *w, int revents)
         LOG_TRACE("%s -> %s, read %zd bytes (total: %s)", b->from_label, b->to_label, n,
                   format_size(size_buf, sizeof(size_buf), b->total_read));
 
-        if (b->len == BUF_SIZE)
-            ev_io_stop(EV_A_ & b->rw);
+        if (broker_buf_full(b))
+            ev_io_stop(loop, &b->rw);
         if (!ev_is_active(&b->ww))
-            ev_io_start(EV_A_ & b->ww);
+            ev_io_start(loop, &b->ww);
     } else if (n == 0) {
         b->eof = 1;
-        ev_io_stop(EV_A_ & b->rw);
+        ev_io_stop(loop, &b->rw);
         LOG_TRACE("%s -> %s, EOF (buf:%zu/%zu)", b->from_label, b->to_label, b->sent, b->len);
         if (b->sent == b->len) {
             shutdown(b->to_fd, SHUT_WR);
@@ -191,8 +256,8 @@ static void on_readable(struct ev_loop *loop, ev_io *w, int revents)
         LOG_ERROR("%s -> %s, read error: %s", b->from_label, b->to_label, strerror(errno));
         shutdown(b->from_fd, SHUT_RD);
         shutdown(b->to_fd, SHUT_WR);
-        ev_io_stop(EV_A_ & b->rw);
-        ev_io_stop(EV_A_ & b->ww);
+        ev_io_stop(loop, &b->rw);
+        ev_io_stop(loop, &b->ww);
         broker_done(b);
     }
 }
@@ -210,9 +275,17 @@ static broker_t *broker_new(conn_pair_t *p, int to_fd, int from_fd, const char *
     strncpy(b->from_label, from_label, sizeof(b->from_label) - 1);
     strncpy(b->to_label, to_label, sizeof(b->to_label) - 1);
 
+#ifdef USE_SPLICE
+    if (broker_pipe_new(b) < 0) {
+        LOG_ERROR("%s: pipe failed: %s", from_label, strerror(errno));
+        free(b);
+        return NULL;
+    }
+#endif
+
     set_nonblock(from_fd);
-    ev_io_init(&b->rw, on_readable, from_fd, EV_READ);
-    ev_io_init(&b->ww, on_writable, to_fd, EV_WRITE);
+    ev_io_init(&b->rw, broker_on_readable, from_fd, EV_READ);
+    ev_io_init(&b->ww, broker_on_writable, to_fd, EV_WRITE);
     b->rw.data = b->ww.data = b;
 
     ev_io_start(p->loop, &b->rw);
@@ -281,6 +354,16 @@ static void conn_pair_new(struct ev_loop *loop, int client_fd, const char *clien
     return;
 
 cleanup:
+#ifdef USE_SPLICE
+    if (p->fwd) {
+        close(p->fwd->pipe[0]);
+        close(p->fwd->pipe[1]);
+    }
+    if (p->bwd) {
+        close(p->bwd->pipe[0]);
+        close(p->bwd->pipe[1]);
+    }
+#endif
     if (p->fwd)
         free(p->fwd);
     if (p->bwd)
@@ -296,7 +379,7 @@ typedef struct {
     ev_io accept_w;
 } server_t;
 
-static void on_accept(struct ev_loop *loop, ev_io *w, int revents)
+static void server_on_accept(struct ev_loop *loop, ev_io *w, int revents)
 {
     server_t *s = (server_t *)w->data;
     (void)loop;
@@ -344,7 +427,7 @@ static server_t *server_new(struct ev_loop *loop, const char *addr, int port)
     listen(s->listen_fd, 1024);
     set_nonblock(s->listen_fd);
 
-    ev_io_init(&s->accept_w, on_accept, s->listen_fd, EV_READ);
+    ev_io_init(&s->accept_w, server_on_accept, s->listen_fd, EV_READ);
     s->accept_w.data = s;
     ev_io_start(loop, &s->accept_w);
 
