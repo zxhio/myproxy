@@ -15,9 +15,9 @@
 
 typedef struct {
     int verbose;
-    char *listen_addr;
+    char *listen_ip;
     int listen_port;
-    char *backend_addr;
+    char *backend_ip;
     int backend_port;
 } config_t;
 
@@ -37,14 +37,16 @@ typedef struct conn_pair conn_pair_t;
 
 typedef struct {
     conn_pair_t *pair;
+    char from_label[32];
+    char to_label[32];
     int to_fd;
     int from_fd;
-    ev_io rw, ww;
-    unsigned char buf[BUF_SIZE];
-    char from_label[48];
-    char to_label[48];
-    size_t len, sent;
+    ev_io rw;
+    ev_io ww;
     int eof;
+    unsigned char buf[BUF_SIZE];
+    size_t len;
+    size_t sent;
     size_t total_read;
     size_t total_write;
 } broker_t;
@@ -97,6 +99,7 @@ static void broker_done(broker_t *b)
         format_size(fwd_rate_buf, sizeof(fwd_rate_buf), (size_t)(p->fwd->total_write / duration)),
         format_size(bwd_buf, sizeof(bwd_buf), p->bwd->total_write),
         format_size(bwd_rate_buf, sizeof(bwd_rate_buf), (size_t)(p->bwd->total_write / duration)));
+
     close(p->client_fd);
     close(p->backend_fd);
     free(p->fwd);
@@ -106,9 +109,10 @@ static void broker_done(broker_t *b)
 
 static void on_writable(struct ev_loop *loop, ev_io *w, int revents)
 {
-    broker_t *b = (broker_t *)w->data;
     (void)loop;
     (void)revents;
+
+    broker_t *b = (broker_t *)w->data;
 
     if (b->sent == b->len) {
         b->len = b->sent = 0;
@@ -152,9 +156,10 @@ static void on_writable(struct ev_loop *loop, ev_io *w, int revents)
 
 static void on_readable(struct ev_loop *loop, ev_io *w, int revents)
 {
-    broker_t *b = (broker_t *)w->data;
     (void)loop;
     (void)revents;
+
+    broker_t *b = (broker_t *)w->data;
 
     // Prevent read returning 0 and being mistaken for EOF when buffer is full
     if (b->len == BUF_SIZE) {
@@ -215,13 +220,41 @@ static broker_t *broker_new(conn_pair_t *p, int to_fd, int from_fd, const char *
 }
 
 // conn_pair_new - Create bidirectional proxy connection between client and backend
-static void conn_pair_new(struct ev_loop *loop, int client_fd, int backend_fd,
-                          const char *client_ip, int client_port, const char *backend_ip,
-                          int backend_port)
+static void conn_pair_new(struct ev_loop *loop, int client_fd, const char *client_ip,
+                          int client_port, const char *backend_ip, int backend_port)
 {
-    conn_pair_t *p = (conn_pair_t *)calloc(1, sizeof(*p));
-    if (!p)
+    int backend_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (backend_fd < 0) {
+        LOG_ERROR("socket: %s", strerror(errno));
+        close(client_fd);
         return;
+    }
+
+    set_nonblock(client_fd);
+    set_nonblock(backend_fd);
+
+    struct sockaddr_in backend_addr;
+    memset(&backend_addr, 0, sizeof(backend_addr));
+    backend_addr.sin_family = AF_INET;
+    backend_addr.sin_port = htons(backend_port);
+    inet_pton(AF_INET, backend_ip, &backend_addr.sin_addr);
+
+    if (connect(backend_fd, (struct sockaddr *)&backend_addr, sizeof(backend_addr)) < 0 &&
+        errno != EINPROGRESS) {
+        LOG_ERROR("Connection to %s:%d failed", backend_ip, backend_port);
+        close(client_fd);
+        close(backend_fd);
+        return;
+    }
+
+    LOG_INFO("Connected to %s:%d", backend_ip, backend_port);
+
+    conn_pair_t *p = (conn_pair_t *)calloc(1, sizeof(*p));
+    if (!p) {
+        close(client_fd);
+        close(backend_fd);
+        return;
+    }
 
     p->loop = loop;
     p->client_fd = client_fd;
@@ -229,16 +262,13 @@ static void conn_pair_new(struct ev_loop *loop, int client_fd, int backend_fd,
     p->start_time = ev_time();
 
     // [C] = client, [B] = backend
-    char fwd_from_label[48], fwd_to_label[48];
-    char bwd_from_label[48], bwd_to_label[48];
+    char fwd_from_label[32], fwd_to_label[32];
+    char bwd_from_label[32], bwd_to_label[32];
 
     snprintf(fwd_from_label, sizeof(fwd_from_label), "[C]%s:%d", client_ip, client_port);
     snprintf(fwd_to_label, sizeof(fwd_to_label), "[B]%s:%d", backend_ip, backend_port);
     snprintf(bwd_from_label, sizeof(bwd_from_label), "[B]%s:%d", backend_ip, backend_port);
     snprintf(bwd_to_label, sizeof(bwd_to_label), "[C]%s:%d", client_ip, client_port);
-
-    set_nonblock(client_fd);
-    set_nonblock(backend_fd);
 
     p->fwd = broker_new(p, backend_fd, client_fd, fwd_from_label, fwd_to_label);
     if (!p->fwd)
@@ -287,34 +317,7 @@ static void on_accept(struct ev_loop *loop, ev_io *w, int revents)
     int client_port = ntohs(client_addr.sin_port);
     LOG_INFO("Connection from %s:%d", client_ip, client_port);
 
-    int backend = socket(AF_INET, SOCK_STREAM, 0);
-    if (backend < 0) {
-        LOG_ERROR("socket: %s", strerror(errno));
-        close(client);
-        return;
-    }
-
-    set_nonblock(client);
-    set_nonblock(backend);
-
-    struct sockaddr_in backend_addr;
-    memset(&backend_addr, 0, sizeof(backend_addr));
-    backend_addr.sin_family = AF_INET;
-    backend_addr.sin_port = htons(g_cfg.backend_port);
-    inet_pton(AF_INET, g_cfg.backend_addr, &backend_addr.sin_addr);
-
-    if (connect(backend, (struct sockaddr *)&backend_addr, sizeof(backend_addr)) < 0 &&
-        errno != EINPROGRESS) {
-        LOG_ERROR("Connection to %s:%d failed", g_cfg.backend_addr, g_cfg.backend_port);
-        close(client);
-        close(backend);
-        return;
-    }
-
-    LOG_INFO("Connected to %s:%d", g_cfg.backend_addr, g_cfg.backend_port);
-
-    conn_pair_new(s->loop, client, backend, client_ip, client_port, g_cfg.backend_addr,
-                  g_cfg.backend_port);
+    conn_pair_new(s->loop, client, client_ip, client_port, g_cfg.backend_ip, g_cfg.backend_port);
 }
 
 static server_t *server_new(struct ev_loop *loop, const char *addr, int port)
@@ -346,7 +349,7 @@ static server_t *server_new(struct ev_loop *loop, const char *addr, int port)
     ev_io_start(loop, &s->accept_w);
 
     LOG_INFO("Listening on %s:%d", addr, port);
-    LOG_INFO("Forwarding to %s:%d", g_cfg.backend_addr, g_cfg.backend_port);
+    LOG_INFO("Forwarding to %s:%d", g_cfg.backend_ip, g_cfg.backend_port);
 
     return s;
 }
@@ -469,9 +472,9 @@ int main(int argc, char *argv[])
         goto cleanup;
     }
 
-    g_cfg.listen_addr = listen_addr;
+    g_cfg.listen_ip = listen_addr;
     g_cfg.listen_port = listen_port;
-    g_cfg.backend_addr = backend_addr;
+    g_cfg.backend_ip = backend_addr;
     g_cfg.backend_port = backend_port;
 
     setup_signals();
