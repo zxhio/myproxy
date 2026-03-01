@@ -39,8 +39,6 @@ jobs:
             target: x86_64-macos
           - os: macos-latest
             target: aarch64-macos
-          - os: windows-latest
-            target: x86_64-windows
 
     steps:
       - name: Checkout code
@@ -73,37 +71,19 @@ jobs:
           CMAKE_ARGS: >-
             ${{ matrix.target == 'aarch64-linux' && '-DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64' || '' }}
 
-      - name: Pack (Unix)
-        if: startsWith(github.ref, 'refs/tags/') && matrix.os != 'windows-latest'
+      - name: Pack
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           cd build
           tar czf myproxy-${{ matrix.target }}.tar.gz myproxy
           mv myproxy-${{ matrix.target }}.tar.gz ..
 
-      - name: Pack (Windows)
-        if: startsWith(github.ref, 'refs/tags/') && matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          cd build
-          7z a myproxy-${{ matrix.target }}.zip myproxy.exe
-          mv myproxy-${{ matrix.target }}.zip ..
-
-      - name: Upload Release Assets (Unix)
-        if: startsWith(github.ref, 'refs/tags/') && matrix.os != 'windows-latest'
+      - name: Upload Release Assets
+        if: startsWith(github.ref, 'refs/tags/')
         uses: svenstaro/upload-release-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag: ${{ needs.get-build-info.outputs.version }}
           file: myproxy-${{ matrix.target }}.tar.gz
-          overwrite: true
-
-      - name: Upload Release Assets (Windows)
-        if: startsWith(github.ref, 'refs/tags/') && matrix.os == 'windows-latest'
-        uses: svenstaro/upload-release-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag: ${{ needs.get-build-info.outputs.version }}
-          file: myproxy-${{ matrix.target }}.zip
           overwrite: true

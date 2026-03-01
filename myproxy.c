@@ -1,21 +1,9 @@
-#ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#define close(fd) closesocket(fd)
-#define read(fd, buf, len) recv(fd, buf, len, 0)
-#define write(fd, buf, len) send(fd, buf, len, 0)
-#define SHUT_RD SD_RECEIVE
-#define SHUT_WR SD_SEND
-#define SHUT_RDWR SD_BOTH
-typedef int socklen_t;
-#else
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/signal.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#endif
 
 #include <ev.h>
 #include <getopt.h>
@@ -71,15 +59,7 @@ struct conn_pair {
     ev_tstamp start_time;
 };
 
-#ifdef _WIN32
-static void set_nonblock(int fd)
-{
-    u_long mode = 1;
-    ioctlsocket(fd, FIONBIO, &mode);
-}
-#else
 static void set_nonblock(int fd) { fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK); }
-#endif
 
 static char *format_size(char *buf, size_t buf_len, size_t bytes)
 {
@@ -380,11 +360,7 @@ static void server_free(server_t *s)
     }
 }
 
-#ifdef _WIN32
-static void setup_signals(void) { /* Windows doesn't have SIGPIPE */ }
-#else
 static void setup_signals(void) { signal(SIGPIPE, SIG_IGN); }
-#endif
 
 static int parse_addr(const char *addr_str, char *host, size_t host_buf_len, int *port)
 {
@@ -437,14 +413,6 @@ static void print_usage(const char *prog)
 
 int main(int argc, char *argv[])
 {
-#ifdef _WIN32
-    WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        fprintf(stderr, "WSAStartup failed\n");
-        return 1;
-    }
-#endif
-
     static struct option long_options[] = {{"listen-addr", required_argument, 0, 'l'},
                                            {"backend-addr", required_argument, 0, 'b'},
                                            {"verbose", no_argument, 0, 'v'},
@@ -526,8 +494,5 @@ int main(int argc, char *argv[])
     server_free(s);
 
 cleanup:
-#ifdef _WIN32
-    WSACleanup();
-#endif
     return ret;
 }
