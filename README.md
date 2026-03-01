@@ -4,11 +4,17 @@
 
 Lightweight TCP proxy with extremely low resource footprint.
 
+## Features
+
+- **Zero-copy**: Uses `splice()` on Linux for kernel-space data transfer
+- **Event-driven**: Built with libev for efficient I/O multiplexing
+- **Statically linked**: No external runtime dependencies
+
 ## Resource Usage
 
-- **Memory**: ~64KB per connection
 - **CPU**: Event-driven, O(1) per connection
-- **Binary**: Statically linked, no external dependencies
+- **Binary**: ~760KB static binary
+- **Data Transfer**: Zero-copy on Linux via `splice()`, traditional read/write on macOS
 
 ## Build
 
