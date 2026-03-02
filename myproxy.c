@@ -34,14 +34,17 @@
 #endif
 
 typedef struct {
-    int verbose;
-    char *listen_ip;
+    char listen_ip[24];
     int listen_port;
-    char *backend_ip;
+    char backend_ip[24];
     int backend_port;
+} proxy_config_t;
+
+typedef struct {
+    int verbose;
 } config_t;
 
-static config_t g_cfg = {0, NULL, 0, NULL, 0};
+static config_t g_cfg = {0};
 
 #define LOG(level, fmt, ...)                                                                       \
     do {                                                                                           \
@@ -67,6 +70,10 @@ static char *format_size(char *buf, size_t buf_len, size_t bytes)
         snprintf(buf, buf_len, "%.2f TiB", bytes / (1024.0 * 1024 * 1024 * 1024));
     return buf;
 }
+
+// =============================================================================
+// Broker & Connection Pair
+// =============================================================================
 
 typedef struct conn_pair conn_pair_t;
 
@@ -390,6 +397,8 @@ typedef struct {
     struct ev_loop *loop;
     int listen_fd;
     ev_io accept_w;
+    char backend_ip[24];
+    int backend_port;
 } server_t;
 
 static void server_on_accept(struct ev_loop *loop, ev_io *w, int revents)
@@ -412,26 +421,29 @@ static void server_on_accept(struct ev_loop *loop, ev_io *w, int revents)
     inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
     int client_port = ntohs(client_addr.sin_port);
 
-    conn_pair_new(s->loop, client, client_ip, client_port, g_cfg.backend_ip, g_cfg.backend_port);
+    conn_pair_new(s->loop, client, client_ip, client_port, s->backend_ip, s->backend_port);
 }
 
-static server_t *server_new(struct ev_loop *loop, const char *addr, int port)
+static server_t *server_new(struct ev_loop *loop, const char *listen_ip, int listen_port,
+                            const char *backend_ip, int backend_port)
 {
     server_t *s = (server_t *)calloc(1, sizeof(*s));
     if (!s)
         return NULL;
 
     s->loop = loop;
+    strncpy(s->backend_ip, backend_ip, sizeof(s->backend_ip) - 1);
+    s->backend_port = backend_port;
 
     s->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     int reuse = 1;
     setsockopt(s->listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 
-    struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(port)};
-    inet_pton(AF_INET, addr, &a.sin_addr);
+    struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(listen_port)};
+    inet_pton(AF_INET, listen_ip, &a.sin_addr);
 
     if (bind(s->listen_fd, (struct sockaddr *)&a, sizeof(a)) < 0) {
-        LOG_ERROR("bind %s:%d: %s", addr, port, strerror(errno));
+        LOG_ERROR("bind %s:%d: %s", listen_ip, listen_port, strerror(errno));
         free(s);
         return NULL;
     }
@@ -443,8 +455,8 @@ static server_t *server_new(struct ev_loop *loop, const char *addr, int port)
     s->accept_w.data = s;
     ev_io_start(loop, &s->accept_w);
 
-    LOG_DEBUG("Listening on %s:%d", addr, port);
-    LOG_DEBUG("Forwarding to %s:%d", g_cfg.backend_ip, g_cfg.backend_port);
+    LOG_DEBUG("Listening on %s:%d", listen_ip, listen_port);
+    LOG_DEBUG("Forwarding to %s:%d", backend_ip, backend_port);
 
     return s;
 }
@@ -486,6 +498,184 @@ static int parse_addr(const char *addr_str, char *host, size_t host_buf_len, int
     return 0;
 }
 
+// =============================================================================
+// Config File Parser
+// =============================================================================
+// Format: verbose=0 | listen,backend (one per line)
+
+#define MAX_CONFIGS 64
+
+static proxy_config_t g_configs[MAX_CONFIGS];
+static int g_config_count = 0;
+
+// trim_whitespace - Trim leading and trailing whitespace from a string (in-place)
+static void trim_whitespace(char *s)
+{
+    if (!s)
+        return;
+
+    // Trim leading whitespace
+    char *start = s;
+    while (*start == ' ' || *start == '\t')
+        start++;
+
+    // Trim trailing whitespace
+    char *end = s + strlen(s) - 1;
+    while (end >= start && (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r'))
+        *end-- = '\0';
+
+    // Shift string if leading whitespace was trimmed
+    if (start != s) {
+        memmove(s, start, strlen(start) + 1);
+    }
+}
+
+// parse_global_option - Parse global config option (key=value)
+// Supported options: verbose (0=quiet, 1=info, 2=debug)
+// Returns: 0 = success, -1 = error, 1 = not a global option
+static int parse_global_option(char *line, int line_num)
+{
+    char *eq = strchr(line, '=');
+    if (!eq)
+        return 1; // Not a key=value pair
+
+    // Check if it has comma (proxy config), if so, not a global option
+    if (strchr(line, ','))
+        return 1;
+
+    *eq = '\0';
+    char *key = line;
+    char *val = eq + 1;
+
+    trim_whitespace(key);
+    trim_whitespace(val);
+
+    // Parse verbose option
+    if (strcmp(key, "verbose") == 0) {
+        g_cfg.verbose = atoi(val);
+        if (g_cfg.verbose < 0 || g_cfg.verbose > 2) {
+            LOG_ERROR("Invalid verbose value at line %d: %s (must be 0-2)", line_num, val);
+            return -1;
+        }
+    } else {
+        LOG_ERROR("Unknown config option at line %d: %s", line_num, key);
+        return -1;
+    }
+
+    return 0;
+}
+
+// parse_proxy_config_line - Parse a single proxy config line (listen,backend)
+// Format: listen-addr,backend-addr (e.g., "0.0.0.0:8080,127.0.0.1:8000")
+// Returns: 0 = success, -1 = error
+static int parse_proxy_config_line(char *line, int line_num, int index)
+{
+    char *comma = strchr(line, ',');
+    if (!comma) {
+        LOG_ERROR("Invalid config at line %d: missing comma separator", line_num);
+        return -1;
+    }
+
+    *comma = '\0';
+    char *listen_str = line;
+    char *backend_str = comma + 1;
+
+    trim_whitespace(listen_str);
+    trim_whitespace(backend_str);
+
+    // Parse listen address
+    char listen_ip[24];
+    int listen_port;
+    if (parse_addr(listen_str, listen_ip, sizeof(listen_ip), &listen_port) < 0) {
+        LOG_ERROR("Invalid listen address at line %d: %s", line_num, listen_str);
+        return -1;
+    }
+
+    // Parse backend address
+    char backend_ip[24];
+    int backend_port;
+    if (parse_addr(backend_str, backend_ip, sizeof(backend_ip), &backend_port) < 0) {
+        LOG_ERROR("Invalid backend address at line %d: %s", line_num, backend_str);
+        return -1;
+    }
+
+    // Store config
+    snprintf(g_configs[index].listen_ip, sizeof(g_configs[index].listen_ip), "%s", listen_ip);
+    g_configs[index].listen_port = listen_port;
+    snprintf(g_configs[index].backend_ip, sizeof(g_configs[index].backend_ip), "%s", backend_ip);
+    g_configs[index].backend_port = backend_port;
+
+    return 0;
+}
+
+// parse_config_file - Parse config file with global options and proxy configs
+// The file is processed line by line:
+//   1. Empty lines and comments (#) are skipped
+//   2. Lines with '=' are parsed as global options (verbose, etc.)
+//   3. Lines with ',' are parsed as proxy configs (listen,backend)
+// Returns: 0 = success, -1 = error
+static int parse_config_file(const char *filepath)
+{
+    FILE *f = fopen(filepath, "r");
+    if (!f) {
+        LOG_ERROR("Failed to open config file: %s (%s)", filepath, strerror(errno));
+        return -1;
+    }
+
+    char line[512];
+    int line_num = 0;
+    int count = 0;
+
+    while (fgets(line, sizeof(line), f) && count < MAX_CONFIGS) {
+        line_num++;
+
+        // Trim the line (removes newline and whitespace)
+        trim_whitespace(line);
+
+        // Skip empty lines and comments
+        if (line[0] == '\0' || line[0] == '#')
+            continue;
+
+        // Try to parse as global option first
+        int ret = parse_global_option(line, line_num);
+        if (ret < 0) {
+            fclose(f);
+            return -1;
+        }
+        if (ret == 0)
+            continue; // Global option parsed successfully
+
+        // Parse as proxy config
+        if (parse_proxy_config_line(line, line_num, count) < 0) {
+            fclose(f);
+            return -1;
+        }
+        count++;
+    }
+
+    fclose(f);
+
+    if (count == 0) {
+        LOG_ERROR("Config file has no proxy configs: %s", filepath);
+        return -1;
+    }
+
+    // Check for duplicate listen addresses
+    for (int i = 0; i < count; i++) {
+        for (int j = i + 1; j < count; j++) {
+            if (g_configs[i].listen_port == g_configs[j].listen_port &&
+                strcmp(g_configs[i].listen_ip, g_configs[j].listen_ip) == 0) {
+                LOG_ERROR("Duplicate listen address: %s:%d", g_configs[i].listen_ip,
+                          g_configs[i].listen_port);
+                return -1;
+            }
+        }
+    }
+
+    g_config_count = count;
+    return 0;
+}
+
 static void print_version(const char *prog)
 {
     printf("%s %s (%s %s)\n", prog, MYPROXY_VERSION, MYPROXY_COMMIT_HASH, MYPROXY_BUILD_DATE);
@@ -495,48 +685,66 @@ static void print_usage(const char *prog)
 {
     printf("Usage: %s [OPTIONS]\n", prog);
     printf("\nOptions:\n");
+    printf("  -c, --config FILE         Config file with proxy configs\n");
     printf("  -l, --listen-addr ADDR    Listen address (e.g., 0.0.0.0:8080)\n");
     printf("  -b, --backend-addr ADDR   Backend address (e.g., 127.0.0.1:8000)\n");
     printf("  -v, --verbose             Show connection details and traffic stats\n");
     printf("  -vv                       Show detailed read/write operations\n");
     printf("  -V, --version             Show version information\n");
     printf("  -h, --help                Show this help message\n");
+    printf("\nNotes:\n");
+    printf("  --config is mutually exclusive with --listen-addr/--backend-addr\n");
     printf("\nExamples:\n");
     printf("  %s -l 0.0.0.0:8080 -b 127.0.0.1:8000\n", prog);
     printf("  %s --listen-addr 0.0.0.0:8080 --backend-addr backend.local:80 -vv\n", prog);
+    printf("  %s -c /etc/myproxy.conf\n", prog);
+    printf("\nConfig file format:\n");
+    printf("  # Global options (key=value)\n");
+    printf("  verbose=0               # 0=quiet, 1=info, 2=debug\n");
+    printf("  # Proxy configs (listen,backend)\n");
+    printf("  0.0.0.0:8080,127.0.0.1:8000\n");
+    printf("  0.0.0.0:8081,127.0.0.1:8001\n");
 }
 
 int main(int argc, char *argv[])
 {
-    static struct option long_options[] = {{"listen-addr", required_argument, 0, 'l'},
+    static struct option long_options[] = {{"config", required_argument, 0, 'c'},
+                                           {"listen-addr", required_argument, 0, 'l'},
                                            {"backend-addr", required_argument, 0, 'b'},
                                            {"verbose", no_argument, 0, 'v'},
                                            {"version", no_argument, 0, 'V'},
                                            {"help", no_argument, 0, 'h'},
                                            {0, 0, 0, 0}};
 
-    char listen_addr[24] = {0};
+    char listen_ip[24] = {0};
     int listen_port = 0;
-    char backend_addr[24] = {0};
+    char backend_ip[24] = {0};
     int backend_port = 0;
+    char *config_file = NULL;
     int opt;
     int ret = 0;
+    int has_cli_config = 0;
 
-    while ((opt = getopt_long(argc, argv, "l:b:vVh", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "c:l:b:vVh", long_options, NULL)) != -1) {
         switch (opt) {
+        case 'c':
+            config_file = optarg;
+            break;
         case 'l':
-            if (parse_addr(optarg, listen_addr, sizeof(listen_addr), &listen_port) < 0) {
+            if (parse_addr(optarg, listen_ip, sizeof(listen_ip), &listen_port) < 0) {
                 print_usage(argv[0]);
                 ret = 1;
                 goto cleanup;
             }
+            has_cli_config = 1;
             break;
         case 'b':
-            if (parse_addr(optarg, backend_addr, sizeof(backend_addr), &backend_port) < 0) {
+            if (parse_addr(optarg, backend_ip, sizeof(backend_ip), &backend_port) < 0) {
                 print_usage(argv[0]);
                 ret = 1;
                 goto cleanup;
             }
+            has_cli_config = 1;
             break;
         case 'v':
             if (g_cfg.verbose < 2)
@@ -557,17 +765,41 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (listen_port == 0 || backend_port == 0) {
-        LOG_ERROR("Both --listen-addr and --backend-addr are required");
+    // Check mutual exclusivity
+    if (config_file && has_cli_config) {
+        LOG_ERROR("--config is mutually exclusive with --listen-addr/--backend-addr");
         print_usage(argv[0]);
         ret = 1;
         goto cleanup;
     }
 
-    g_cfg.listen_ip = listen_addr;
-    g_cfg.listen_port = listen_port;
-    g_cfg.backend_ip = backend_addr;
-    g_cfg.backend_port = backend_port;
+    // Load configs from file or CLI
+    if (config_file) {
+        if (parse_config_file(config_file) < 0) {
+            ret = 1;
+            goto cleanup;
+        }
+    } else if (has_cli_config) {
+        if (listen_port == 0 || backend_port == 0) {
+            LOG_ERROR("Both --listen-addr and --backend-addr are required");
+            print_usage(argv[0]);
+            ret = 1;
+            goto cleanup;
+        }
+        // Create single config from CLI
+        strncpy(g_configs[0].listen_ip, listen_ip, sizeof(g_configs[0].listen_ip) - 1);
+        g_configs[0].listen_ip[sizeof(g_configs[0].listen_ip) - 1] = '\0';
+        g_configs[0].listen_port = listen_port;
+        strncpy(g_configs[0].backend_ip, backend_ip, sizeof(g_configs[0].backend_ip) - 1);
+        g_configs[0].backend_ip[sizeof(g_configs[0].backend_ip) - 1] = '\0';
+        g_configs[0].backend_port = backend_port;
+        g_config_count = 1;
+    } else {
+        LOG_ERROR("Either --config or both --listen-addr and --backend-addr are required");
+        print_usage(argv[0]);
+        ret = 1;
+        goto cleanup;
+    }
 
     setup_signals();
 
@@ -578,15 +810,27 @@ int main(int argc, char *argv[])
         goto cleanup;
     }
 
-    server_t *s = server_new(loop, listen_addr, listen_port);
-    if (!s) {
-        ret = 1;
-        goto cleanup;
+    // Create servers for all configs
+    server_t *servers[MAX_CONFIGS] = {NULL};
+    int server_count = 0;
+
+    for (int i = 0; i < g_config_count; i++) {
+        server_t *s = server_new(loop, g_configs[i].listen_ip, g_configs[i].listen_port,
+                                 g_configs[i].backend_ip, g_configs[i].backend_port);
+        if (!s) {
+            ret = 1;
+            goto cleanup_servers;
+        }
+        servers[server_count++] = s;
     }
 
     ev_run(loop, 0);
     ev_loop_destroy(loop);
-    server_free(s);
+
+cleanup_servers:
+    for (int i = 0; i < server_count; i++) {
+        server_free(servers[i]);
+    }
 
 cleanup:
     return ret;
