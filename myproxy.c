@@ -166,10 +166,10 @@ static void broker_done(broker_t *b)
 
     char fwd_buf[32], fwd_rate_buf[32];
     char bwd_buf[32], bwd_rate_buf[32];
-    LOG_DEBUG("[FD:%d] CLOSE : %-21s ──▶ %s (Duration: %.2fs)", b->pair->client_fd,
-              p->fwd->from_label, p->fwd->to_label, duration);
+    LOG_DEBUG("[CLOSE#%d] %s -> %s (Duration: %.2fs)", b->pair->client_fd, p->fwd->from_label,
+              p->fwd->to_label, duration);
     LOG_DEBUG(
-        "[FD:%d] STATS : FWD: %s (%s/s) | BWD: %s (%s/s)", b->pair->client_fd,
+        "[STATS#%d] FWD: %s (%s/s) | BWD: %s (%s/s)", b->pair->client_fd,
         format_size(fwd_buf, sizeof(fwd_buf), p->fwd->total_write),
         format_size(fwd_rate_buf, sizeof(fwd_rate_buf), (size_t)(p->fwd->total_write / duration)),
         format_size(bwd_buf, sizeof(bwd_buf), p->bwd->total_write),
@@ -212,9 +212,8 @@ static void broker_on_writable(struct ev_loop *loop, ev_io *w, int revents)
         b->total_write += n;
         b->sent += n;
         char n_buf[32], total_buf[32];
-        LOG_TRACE("[FD:%d] DATA  : %-21s ◀── %-21s <<< WRITE : %10s | Total: %10s",
-                  b->pair->client_fd, b->to_label, b->from_label,
-                  format_size(n_buf, sizeof(n_buf), n),
+        LOG_TRACE("[DATA#%d] %s <- %s << WRITE : %10s | Total: %10s", b->pair->client_fd,
+                  b->to_label, b->from_label, format_size(n_buf, sizeof(n_buf), n),
                   format_size(total_buf, sizeof(total_buf), b->total_write));
 
         if (b->sent == b->len) {
@@ -228,8 +227,8 @@ static void broker_on_writable(struct ev_loop *loop, ev_io *w, int revents)
             }
         }
     } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-        LOG_ERROR("[FD:%d] ERROR : %-21s ◀── %-21s WRITE error: %s", b->pair->client_fd,
-                  b->to_label, b->from_label, strerror(errno));
+        LOG_ERROR("[ERROR#%d] %s <- %s WRITE error: %s", b->pair->client_fd, b->to_label,
+                  b->from_label, strerror(errno));
         shutdown(b->from_fd, SHUT_RD);
         shutdown(b->to_fd, SHUT_WR);
         ev_io_stop(loop, &b->ww);
@@ -256,9 +255,8 @@ static void broker_on_readable(struct ev_loop *loop, ev_io *w, int revents)
         b->total_read += n;
         b->len += n;
         char n_buf[32], total_buf[32];
-        LOG_TRACE("[FD:%d] DATA  : %-21s ──▶ %-21s >>> READ  : %10s | Total: %10s",
-                  b->pair->client_fd, b->from_label, b->to_label,
-                  format_size(n_buf, sizeof(n_buf), n),
+        LOG_TRACE("[DATA#%d] %s -> %s >> READ  : %10s | Total: %10s", b->pair->client_fd,
+                  b->from_label, b->to_label, format_size(n_buf, sizeof(n_buf), n),
                   format_size(total_buf, sizeof(total_buf), b->total_read));
 
         if (broker_buf_full(b))
@@ -268,15 +266,15 @@ static void broker_on_readable(struct ev_loop *loop, ev_io *w, int revents)
     } else if (n == 0) {
         b->eof = 1;
         ev_io_stop(loop, &b->rw);
-        LOG_TRACE("[FD:%d] DATA  : %-21s ──▶ %-21s EOF (sent:%zu len:%zu)", b->pair->client_fd,
-                  b->from_label, b->to_label, b->sent, b->len);
+        LOG_TRACE("[DATA#%d] %s -> %s EOF (sent:%zu len:%zu)", b->pair->client_fd, b->from_label,
+                  b->to_label, b->sent, b->len);
         if (b->sent == b->len) {
             shutdown(b->to_fd, SHUT_WR);
             broker_done(b);
         }
     } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-        LOG_ERROR("[FD:%d] ERROR : %-21s ──▶ %-21s READ error: %s", b->pair->client_fd,
-                  b->from_label, b->to_label, strerror(errno));
+        LOG_ERROR("[ERROR#%d] %s -> %s READ error: %s", b->pair->client_fd, b->from_label,
+                  b->to_label, strerror(errno));
         shutdown(b->from_fd, SHUT_RD);
         shutdown(b->to_fd, SHUT_WR);
         ev_io_stop(loop, &b->rw);
@@ -361,7 +359,7 @@ static void conn_pair_new(struct ev_loop *loop, int client_fd, const char *clien
     snprintf(backend_label, sizeof(backend_label), "%s:%d", backend_ip, backend_port);
 
     // Log connection OPEN
-    LOG_DEBUG("[FD:%d] OPEN  : %-21s ──▶ %s (Ready)", client_fd, client_label, backend_label);
+    LOG_DEBUG("[OPEN#%d] %s -> %s", client_fd, client_label, backend_label);
 
     p->fwd = broker_new(p, backend_fd, client_fd, client_fd, client_label, backend_label);
     if (!p->fwd)
@@ -455,8 +453,8 @@ static server_t *server_new(struct ev_loop *loop, const char *listen_ip, int lis
     s->accept_w.data = s;
     ev_io_start(loop, &s->accept_w);
 
-    LOG_DEBUG("Listening on %s:%d", listen_ip, listen_port);
-    LOG_DEBUG("Forwarding to %s:%d", backend_ip, backend_port);
+    LOG_DEBUG("[PROXY#%d] %s:%d -> %s:%d", s->listen_fd, listen_ip, listen_port, backend_ip,
+              backend_port);
 
     return s;
 }
