@@ -28,10 +28,12 @@ make
 
 ```bash
 ./myproxy -l <listen_addr> -b <backend_addr> [OPTIONS]
+./myproxy -c <config_file>
 ```
 
 | Option            | Description                    |
 |-------------------|--------------------------------|
+| -c, --config      | Config file with proxy configs |
 | -l, --listen-addr | Listen address (ip:port)     |
 | -b, --backend-addr| Backend address (ip:port)    |
 | -v, --verbose     | Show connection stats          |
@@ -41,9 +43,25 @@ make
 ### Examples
 
 ```bash
-# Forward local 8080 to backend 8000
+# Single proxy (CLI)
 ./myproxy -l 0.0.0.0:8080 -b 127.0.0.1:8000
 
-# With verbose logging
-./myproxy -l 0.0.0.0:8080 -b backend.local:80 -vv
+# Multiple proxies (config file)
+cat > myproxy.conf << EOF
+verbose=1
+0.0.0.0:8080,127.0.0.1:8000
+0.0.0.0:8081,127.0.0.1:8001
+EOF
+./myproxy -c myproxy.conf
+```
+
+### Config File Format
+
+```bash
+# Global options (key=value)
+verbose=1               # 0=quiet, 1=info, 2=debug
+
+# Proxy configs (listen,backend)
+0.0.0.0:8080,127.0.0.1:8000
+0.0.0.0:8081,127.0.0.1:8001
 ```
