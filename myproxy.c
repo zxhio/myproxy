@@ -3,9 +3,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/tcp.h>
+#include <stdarg.h>
 #include <sys/ioctl.h>
 #include <sys/signal.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <ev.h>
@@ -33,6 +35,9 @@
 #define USE_SPLICE
 #endif
 
+#define DEFAULT_LOG_MAX_SIZE (10 * 1024 * 1024) // 10MB per file
+#define DEFAULT_LOG_MAX_FILES 10                // Keep 10 files
+
 typedef struct {
     char listen_ip[24];
     int listen_port;
@@ -40,21 +45,170 @@ typedef struct {
     int backend_port;
 } proxy_config_t;
 
+typedef enum {
+    LOG_LEVEL_ERROR = 0,
+    LOG_LEVEL_INFO = 1,
+    LOG_LEVEL_DEBUG = 2,
+    LOG_LEVEL_TRACE = 3,
+} log_level_t;
+
 typedef struct {
-    int verbose;
+    log_level_t level;
+    char log_file[512];
+    size_t log_max_size;
+    int log_max_files;
 } config_t;
 
-static config_t g_cfg = {0};
+static config_t g_cfg = {
+    .level = LOG_LEVEL_INFO,
+    .log_max_size = DEFAULT_LOG_MAX_SIZE,
+    .log_max_files = DEFAULT_LOG_MAX_FILES,
+};
 
-#define LOG(level, fmt, ...)                                                                       \
+// =============================================================================
+// Log File Module
+// =============================================================================
+
+typedef struct {
+    FILE *fp;
+    char path[512];
+    size_t max_size;
+    int max_files;
+    size_t current_size;
+} log_file_t;
+
+static log_file_t g_log = {0};
+
+static void log_rotate(log_file_t *log)
+{
+    if (!log->fp)
+        return;
+
+    fclose(log->fp);
+
+    // Delete oldest file
+    char old[600];
+    snprintf(old, sizeof(old), "%s.%d", log->path, log->max_files);
+    unlink(old);
+
+    // Rotate .N to .N+1
+    for (int i = log->max_files - 1; i > 0; i--) {
+        char src[600], dst[600];
+        snprintf(src, sizeof(src), "%s.%d", log->path, i);
+        snprintf(dst, sizeof(dst), "%s.%d", log->path, i + 1);
+        rename(src, dst);
+    }
+
+    // Current to .1
+    char dst[600];
+    snprintf(dst, sizeof(dst), "%s.1", log->path);
+    rename(log->path, dst);
+
+    // Open new file
+    log->fp = fopen(log->path, "w");
+    log->current_size = 0;
+}
+
+static int log_init(log_file_t *log, const char *path)
+{
+    log->fp = NULL;
+
+    // If no path specified, just initialize (output to terminal only)
+    if (!path || path[0] == '\0')
+        return 0;
+
+    log->fp = fopen(path, "a");
+    if (!log->fp) {
+        fprintf(stderr, "Failed to open log file: %s\n", path);
+        return -1;
+    }
+
+    strncpy(log->path, path, sizeof(log->path) - 1);
+    log->path[sizeof(log->path) - 1] = '\0';
+    log->max_size = g_cfg.log_max_size;
+    log->max_files = g_cfg.log_max_files;
+
+    // Get current file size
+    fseek(log->fp, 0, SEEK_END);
+    log->current_size = ftell(log->fp);
+
+    return 0;
+}
+
+static void log_cleanup(log_file_t *log)
+{
+    if (log->fp) {
+        fclose(log->fp);
+        log->fp = NULL;
+    }
+}
+
+// =============================================================================
+// Logging Functions
+// =============================================================================
+
+static void log_file_write(log_file_t *log, const char *msg)
+{
+    size_t len = strlen(msg);
+
+    // Check if rotation is needed before writing
+    if (log->current_size + len > log->max_size)
+        log_rotate(log);
+
+    // Write directly to file (stdio handles buffering)
+    fprintf(log->fp, "%s\n", msg);
+    fflush(log->fp);
+    log->current_size += len + 1;
+}
+
+static void log_stdio_write(int is_error, const char *msg)
+{
+    FILE *out = is_error ? stderr : stdout;
+    fprintf(out, "%s\n", msg);
+}
+
+static void log_write(log_level_t level, const char *fmt, ...)
+{
+    // Get timestamp using ev_time
+    time_t now = (time_t)ev_time();
+    struct tm *tm_info = localtime(&now);
+    char ts[32];
+    strftime(ts, sizeof(ts), "%Y/%m/%d %H:%M:%S", tm_info);
+
+    // Log level char
+    static const char level_chars[] = "EIDT";
+    char level_char = (level < 4) ? level_chars[level] : '?';
+
+    // Format: timestamp + level + user message
+    char buf[2048];
+    va_list args;
+    va_start(args, fmt);
+    int len = snprintf(buf, sizeof(buf), "%s %c ", ts, level_char);
+    vsnprintf(buf + len, sizeof(buf) - len, fmt, args);
+    va_end(args);
+
+    if (g_log.fp) {
+        log_file_write(&g_log, buf);
+    } else {
+        log_stdio_write(level == LOG_LEVEL_ERROR, buf);
+    }
+}
+
+#define LOG(lvl, ...)                                                                              \
     do {                                                                                           \
-        if (g_cfg.verbose >= level)                                                                \
-            printf(fmt "\n", ##__VA_ARGS__);                                                       \
+        if (__builtin_expect(g_cfg.level >= (lvl), 0))                                             \
+            log_write((lvl), __VA_ARGS__);                                                         \
     } while (0)
-#define LOG_DEBUG(fmt, ...) LOG(1, fmt, ##__VA_ARGS__)
-#define LOG_TRACE(fmt, ...) LOG(2, fmt, ##__VA_ARGS__)
-#define LOG_INFO(fmt, ...) printf(fmt "\n", ##__VA_ARGS__)
-#define LOG_ERROR(fmt, ...) fprintf(stderr, fmt "\n", ##__VA_ARGS__)
+#define LOG_ERROR(...) LOG(LOG_LEVEL_ERROR, __VA_ARGS__)
+#define LOG_INFO(...) LOG(LOG_LEVEL_INFO, __VA_ARGS__)
+#define LOG_DEBUG(...) LOG(LOG_LEVEL_DEBUG, __VA_ARGS__)
+#define LOG_TRACE(...) LOG(LOG_LEVEL_TRACE, __VA_ARGS__)
+
+// =============================================================================
+// Broker & Connection Pair
+// =============================================================================
+
+typedef struct conn_pair conn_pair_t;
 
 static char *format_size(char *buf, size_t buf_len, size_t bytes)
 {
@@ -70,12 +224,6 @@ static char *format_size(char *buf, size_t buf_len, size_t bytes)
         snprintf(buf, buf_len, "%.2f TiB", bytes / (1024.0 * 1024 * 1024 * 1024));
     return buf;
 }
-
-// =============================================================================
-// Broker & Connection Pair
-// =============================================================================
-
-typedef struct conn_pair conn_pair_t;
 
 typedef struct {
     conn_pair_t *pair;
@@ -529,13 +677,26 @@ static void trim_whitespace(char *s)
 }
 
 // parse_global_option - Parse global config option (key=value)
-// Supported options: verbose (0=quiet, 1=info, 2=debug)
+// Supported options: log-level, log-file, log-max-size, log-max-files
 // Returns: 0 = success, -1 = error, 1 = not a global option
 static int parse_global_option(char *line, int line_num)
 {
     char *eq = strchr(line, '=');
     if (!eq)
         return 1; // Not a key=value pair
+
+    // Strip inline comments before parsing
+    char *comment = strchr(line, '#');
+    if (comment)
+        *comment = '\0';
+
+    // Trim whitespace from the entire line after comment removal
+    trim_whitespace(line);
+
+    // Re-find '=' after comment stripping and trimming
+    eq = strchr(line, '=');
+    if (!eq)
+        return 1;
 
     // Check if it has comma (proxy config), if so, not a global option
     if (strchr(line, ','))
@@ -548,15 +709,31 @@ static int parse_global_option(char *line, int line_num)
     trim_whitespace(key);
     trim_whitespace(val);
 
-    // Parse verbose option
-    if (strcmp(key, "verbose") == 0) {
-        g_cfg.verbose = atoi(val);
-        if (g_cfg.verbose < 0 || g_cfg.verbose > 2) {
-            LOG_ERROR("Invalid verbose value at line %d: %s (must be 0-2)", line_num, val);
+    // Parse log-level option
+    if (strcmp(key, "log-level") == 0) {
+        if (strcasecmp(val, "error") == 0)
+            g_cfg.level = LOG_LEVEL_ERROR;
+        else if (strcasecmp(val, "info") == 0)
+            g_cfg.level = LOG_LEVEL_INFO;
+        else if (strcasecmp(val, "debug") == 0)
+            g_cfg.level = LOG_LEVEL_DEBUG;
+        else if (strcasecmp(val, "trace") == 0)
+            g_cfg.level = LOG_LEVEL_TRACE;
+        else {
+            fprintf(stderr,
+                    "Invalid log-level value at line %d: %s (must be error/info/debug/trace)\n",
+                    line_num, val);
             return -1;
         }
+    } else if (strcmp(key, "log-file") == 0) {
+        strncpy(g_cfg.log_file, val, sizeof(g_cfg.log_file) - 1);
+        g_cfg.log_file[sizeof(g_cfg.log_file) - 1] = '\0';
+    } else if (strcmp(key, "log-max-size") == 0) {
+        g_cfg.log_max_size = strtoull(val, NULL, 10) * 1024 * 1024;
+    } else if (strcmp(key, "log-max-files") == 0) {
+        g_cfg.log_max_files = atoi(val);
     } else {
-        LOG_ERROR("Unknown config option at line %d: %s", line_num, key);
+        fprintf(stderr, "Unknown config option at line %d: %s\n", line_num, key);
         return -1;
     }
 
@@ -568,6 +745,12 @@ static int parse_global_option(char *line, int line_num)
 // Returns: 0 = success, -1 = error
 static int parse_proxy_config_line(char *line, int line_num, int index)
 {
+    // Strip inline comments before parsing
+    char *comment = strchr(line, '#');
+    if (comment)
+        *comment = '\0';
+    trim_whitespace(line);
+
     char *comma = strchr(line, ',');
     if (!comma) {
         LOG_ERROR("Invalid config at line %d: missing comma separator", line_num);
@@ -686,7 +869,8 @@ static void print_usage(const char *prog)
     printf("  -c, --config FILE         Config file with proxy configs\n");
     printf("  -l, --listen-addr ADDR    Listen address (e.g., 0.0.0.0:8080)\n");
     printf("  -b, --backend-addr ADDR   Backend address (e.g., 127.0.0.1:8000)\n");
-    printf("  -v, --verbose             Show connection details and traffic stats\n");
+    printf("  -L, --log-file FILE       Log file path\n");
+    printf("  -v, --verbose             Increase log level (default: INFO)\n");
     printf("  -vv                       Show detailed read/write operations\n");
     printf("  -V, --version             Show version information\n");
     printf("  -h, --help                Show this help message\n");
@@ -694,11 +878,15 @@ static void print_usage(const char *prog)
     printf("  --config is mutually exclusive with --listen-addr/--backend-addr\n");
     printf("\nExamples:\n");
     printf("  %s -l 0.0.0.0:8080 -b 127.0.0.1:8000\n", prog);
+    printf("  %s -l 0.0.0.0:8080 -b 127.0.0.1:8000 -L /var/log/myproxy.log\n", prog);
     printf("  %s --listen-addr 0.0.0.0:8080 --backend-addr backend.local:80 -vv\n", prog);
     printf("  %s -c /etc/myproxy.conf\n", prog);
     printf("\nConfig file format:\n");
     printf("  # Global options (key=value)\n");
-    printf("  verbose=0               # 0=quiet, 1=info, 2=debug\n");
+    printf("  log-level=info           # error, info (default), debug, trace\n");
+    printf("  log-file=/path/to.log     # Log file path\n");
+    printf("  log-max-size=10          # Max log file size in MB (default: 10)\n");
+    printf("  log-max-files=10         # Number of log files to keep (default: 10)\n");
     printf("  # Proxy configs (listen,backend)\n");
     printf("  0.0.0.0:8080,127.0.0.1:8000\n");
     printf("  0.0.0.0:8081,127.0.0.1:8001\n");
@@ -709,6 +897,7 @@ int main(int argc, char *argv[])
     static struct option long_options[] = {{"config", required_argument, 0, 'c'},
                                            {"listen-addr", required_argument, 0, 'l'},
                                            {"backend-addr", required_argument, 0, 'b'},
+                                           {"log-file", required_argument, 0, 'L'},
                                            {"verbose", no_argument, 0, 'v'},
                                            {"version", no_argument, 0, 'V'},
                                            {"help", no_argument, 0, 'h'},
@@ -720,10 +909,9 @@ int main(int argc, char *argv[])
     int backend_port = 0;
     char *config_file = NULL;
     int opt;
-    int ret = 0;
     int has_cli_config = 0;
 
-    while ((opt = getopt_long(argc, argv, "c:l:b:vVh", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "c:l:b:L:vVh", long_options, NULL)) != -1) {
         switch (opt) {
         case 'c':
             config_file = optarg;
@@ -731,35 +919,34 @@ int main(int argc, char *argv[])
         case 'l':
             if (parse_addr(optarg, listen_ip, sizeof(listen_ip), &listen_port) < 0) {
                 print_usage(argv[0]);
-                ret = 1;
-                goto cleanup;
+                return 1;
             }
             has_cli_config = 1;
             break;
         case 'b':
             if (parse_addr(optarg, backend_ip, sizeof(backend_ip), &backend_port) < 0) {
                 print_usage(argv[0]);
-                ret = 1;
-                goto cleanup;
+                return 1;
             }
             has_cli_config = 1;
             break;
+        case 'L':
+            strncpy(g_cfg.log_file, optarg, sizeof(g_cfg.log_file) - 1);
+            g_cfg.log_file[sizeof(g_cfg.log_file) - 1] = '\0';
+            break;
         case 'v':
-            if (g_cfg.verbose < 2)
-                g_cfg.verbose++;
+            if (g_cfg.level < LOG_LEVEL_TRACE)
+                g_cfg.level++;
             break;
         case 'V':
             print_version(argv[0]);
-            ret = 0;
-            goto cleanup;
+            return 0;
         case 'h':
             print_usage(argv[0]);
-            ret = 0;
-            goto cleanup;
+            return 0;
         default:
             print_usage(argv[0]);
-            ret = 1;
-            goto cleanup;
+            return 1;
         }
     }
 
@@ -767,22 +954,18 @@ int main(int argc, char *argv[])
     if (config_file && has_cli_config) {
         LOG_ERROR("--config is mutually exclusive with --listen-addr/--backend-addr");
         print_usage(argv[0]);
-        ret = 1;
-        goto cleanup;
+        return 1;
     }
 
     // Load configs from file or CLI
     if (config_file) {
-        if (parse_config_file(config_file) < 0) {
-            ret = 1;
-            goto cleanup;
-        }
+        if (parse_config_file(config_file) < 0)
+            return 1;
     } else if (has_cli_config) {
         if (listen_port == 0 || backend_port == 0) {
             LOG_ERROR("Both --listen-addr and --backend-addr are required");
             print_usage(argv[0]);
-            ret = 1;
-            goto cleanup;
+            return 1;
         }
         // Create single config from CLI
         strncpy(g_configs[0].listen_ip, listen_ip, sizeof(g_configs[0].listen_ip) - 1);
@@ -795,41 +978,40 @@ int main(int argc, char *argv[])
     } else {
         LOG_ERROR("Either --config or both --listen-addr and --backend-addr are required");
         print_usage(argv[0]);
-        ret = 1;
-        goto cleanup;
+        return 1;
     }
 
     setup_signals();
 
+    // Initialize log (always called, internally decides whether to use file)
+    if (log_init(&g_log, g_cfg.log_file) < 0)
+        return 1;
+
     struct ev_loop *loop = ev_default_loop(0);
     if (!loop) {
         LOG_ERROR("Failed to create event loop");
-        ret = 1;
-        goto cleanup;
+        log_cleanup(&g_log);
+        return 1;
     }
 
     // Create servers for all configs
     server_t *servers[MAX_CONFIGS] = {NULL};
     int server_count = 0;
-
     for (int i = 0; i < g_config_count; i++) {
         server_t *s = server_new(loop, g_configs[i].listen_ip, g_configs[i].listen_port,
                                  g_configs[i].backend_ip, g_configs[i].backend_port);
-        if (!s) {
-            ret = 1;
-            goto cleanup_servers;
-        }
+        if (!s)
+            goto cleanup;
         servers[server_count++] = s;
     }
 
     ev_run(loop, 0);
-    ev_loop_destroy(loop);
-
-cleanup_servers:
-    for (int i = 0; i < server_count; i++) {
-        server_free(servers[i]);
-    }
 
 cleanup:
-    return ret;
+    for (int i = 0; i < server_count; i++)
+        server_free(servers[i]);
+    ev_loop_destroy(loop);
+    log_cleanup(&g_log);
+
+    return 0;
 }
