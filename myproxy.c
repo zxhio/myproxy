@@ -169,29 +169,32 @@ static void log_stdio_write(int is_error, const char *msg)
 
 static void log_write(log_level_t level, const char *fmt, ...)
 {
-    // Get timestamp using ev_time
-    time_t now = (time_t)ev_time();
-    struct tm *tm_info = localtime(&now);
-    char ts[32];
-    strftime(ts, sizeof(ts), "%Y/%m/%d %H:%M:%S", tm_info);
-
-    // Log level char
-    static const char level_chars[] = "EIDT";
-    char level_char = (level < 4) ? level_chars[level] : '?';
-
-    // Format: timestamp + level + user message
     char buf[2048];
     va_list args;
     va_start(args, fmt);
-    int len = snprintf(buf, sizeof(buf), "%s %c ", ts, level_char);
-    vsnprintf(buf + len, sizeof(buf) - len, fmt, args);
-    va_end(args);
 
     if (g_log.fp) {
+        // Get timestamp for log file
+        time_t now = (time_t)ev_time();
+        struct tm *tm_info = localtime(&now);
+        char ts[32];
+        strftime(ts, sizeof(ts), "%Y/%m/%d %H:%M:%S", tm_info);
+
+        // Log level char
+        static const char level_chars[] = "EIDT";
+        char level_char = (level < 4) ? level_chars[level] : '?';
+
+        // Format: timestamp + level + user message
+        int len = snprintf(buf, sizeof(buf), "%s %c ", ts, level_char);
+        vsnprintf(buf + len, sizeof(buf) - len, fmt, args);
         log_file_write(&g_log, buf);
     } else {
+        // Terminal: just the user message, no timestamp/level
+        vsnprintf(buf, sizeof(buf), fmt, args);
         log_stdio_write(level == LOG_LEVEL_ERROR, buf);
     }
+
+    va_end(args);
 }
 
 #define LOG(lvl, ...)                                                                              \
