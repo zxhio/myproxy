@@ -19,11 +19,21 @@ Lightweight TCP proxy with extremely low resource footprint.
 
 ## Build
 
+Requires CMake and a C compiler.
+
 ```bash
-mkdir build && cd build
-cmake ..
-make
+make build                    # current platform
+make build-linux-arm64        # cross-compile for Linux ARM64
 ```
+
+## Pack
+
+```bash
+make pack                     # build + package for current platform
+make pack-all                 # package all platforms
+```
+
+Output tarballs are written to `dist/`.
 
 ## Usage
 
@@ -52,18 +62,12 @@ make
 ./myproxy -l 0.0.0.0:8080 -b 127.0.0.1:8000 -L /var/log/myproxy.log
 
 # Multiple proxies (config file)
-cat > myproxy.conf << EOF
-log-level=info           # error, info (default), debug, trace
-log-file=myproxy.log     # Log file path
-log-max-size=10          # Max log file size in MB (default: 10)
-log-max-files=10         # Number of log files to keep (default: 10)
-0.0.0.0:8080,127.0.0.1:8000
-0.0.0.0:8081,127.0.0.1:8001
-EOF
-./myproxy -c myproxy.conf
+./myproxy -c configs/myproxy.conf.example
 ```
 
 ### Config File Format
+
+See [configs/myproxy.conf.example](configs/myproxy.conf.example) for a full example.
 
 ```bash
 # Global options (key=value)
@@ -94,4 +98,20 @@ Example:
 ```
 2026/03/02 16:21:36 I [PROXY#3] 0.0.0.0:8080 -> 127.0.0.1:8000
 2026/03/02 16:21:40 D [CLOSE#4] 192.168.1.100:52341 -> 10.0.0.1:80 (Duration: 3.52s)
+```
+
+## systemd Deployment
+
+```bash
+# Install (binary, config, systemd unit)
+sudo ./scripts/install-systemd.sh --force --enable --start
+
+# Uninstall (keep config and logs)
+sudo ./scripts/install-systemd.sh uninstall
+
+# Uninstall (remove everything)
+sudo ./scripts/install-systemd.sh uninstall --purge
+
+# Dry run
+sudo ./scripts/install-systemd.sh --dry-run
 ```

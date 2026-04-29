@@ -19,11 +19,21 @@
 
 ## 构建
 
+需要 CMake 和 C 编译器。
+
 ```bash
-mkdir build && cd build
-cmake ..
-make
+make build                    # 当前平台
+make build-linux-arm64        # 交叉编译 Linux ARM64
 ```
+
+## 打包
+
+```bash
+make pack                     # 构建 + 打包当前平台
+make pack-all                 # 打包所有平台
+```
+
+打包输出到 `dist/` 目录。
 
 ## 使用
 
@@ -52,18 +62,12 @@ make
 ./myproxy -l 0.0.0.0:8080 -b 127.0.0.1:8000 -L /var/log/myproxy.log
 
 # 多个代理 (配置文件)
-cat > myproxy.conf << EOF
-log-level=info           # error, info (默认), debug, trace
-log-file=myproxy.log     # 日志文件路径
-log-max-size=10          # 单个日志文件最大大小 MB (默认: 10)
-log-max-files=10         # 保留的日志文件数量 (默认: 10)
-0.0.0.0:8080,127.0.0.1:8000
-0.0.0.0:8081,127.0.0.1:8001
-EOF
-./myproxy -c myproxy.conf
+./myproxy -c configs/myproxy.conf.example
 ```
 
 ### 配置文件格式
+
+完整示例见 [configs/myproxy.conf.example](configs/myproxy.conf.example)。
 
 ```bash
 # 全局选项 (key=value)
@@ -94,4 +98,20 @@ YYYY/MM/DD HH:MM:SS L 消息
 ```
 2026/03/02 16:21:36 I [PROXY#3] 0.0.0.0:8080 -> 127.0.0.1:8000
 2026/03/02 16:21:40 D [CLOSE#4] 192.168.1.100:52341 -> 10.0.0.1:80 (Duration: 3.52s)
+```
+
+## systemd 部署
+
+```bash
+# 安装（二进制、配置、systemd unit）
+sudo ./scripts/install-systemd.sh --force --enable --start
+
+# 卸载（保留配置和日志）
+sudo ./scripts/install-systemd.sh uninstall
+
+# 卸载（删除所有文件）
+sudo ./scripts/install-systemd.sh uninstall --purge
+
+# 预览操作
+sudo ./scripts/install-systemd.sh --dry-run
 ```

@@ -14,7 +14,7 @@ else ifeq ($(GOOS),darwin)
   CMAKE_ARGS := -DCMAKE_OSX_ARCHITECTURES=$(GOARCH)
 endif
 
-.PHONY: build build-linux-amd64 build-linux-arm64 build-darwin-amd64 build-darwin-arm64 \
+.PHONY: build build-linux-amd64 build-linux-arm64 build-darwin-x86_64 build-darwin-arm64 \
         build-all pack pack-all clean
 
 # --- Build ---
@@ -28,8 +28,8 @@ build-linux-amd64:
 build-linux-arm64:
 	$(MAKE) build GOOS=linux GOARCH=arm64
 
-build-darwin-amd64:
-	$(MAKE) build GOOS=darwin GOARCH=amd64
+build-darwin-x86_64:
+	$(MAKE) build GOOS=darwin GOARCH=x86_64
 
 build-darwin-arm64:
 	$(MAKE) build GOOS=darwin GOARCH=arm64
@@ -47,13 +47,13 @@ pack-linux-amd64:
 pack-linux-arm64:
 	$(MAKE) pack GOOS=linux GOARCH=arm64
 
-pack-darwin-amd64:
-	$(MAKE) pack GOOS=darwin GOARCH=amd64
+pack-darwin-x86_64:
+	$(MAKE) pack GOOS=darwin GOARCH=x86_64
 
 pack-darwin-arm64:
 	$(MAKE) pack GOOS=darwin GOARCH=arm64
 
-pack-all: pack-linux-amd64 pack-linux-arm64 pack-darwin-amd64 pack-darwin-arm64
+pack-all: pack-linux-amd64 pack-linux-arm64 pack-darwin-x86_64 pack-darwin-arm64
 
 # --- Clean ---
 
