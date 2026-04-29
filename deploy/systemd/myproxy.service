@@ -1,0 +1,19 @@
+[Unit]
+Description=myproxy lightweight TCP proxy
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/myproxy/myproxy.conf
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/etc/myproxy
+ExecStart=/usr/local/bin/myproxy -c /etc/myproxy/myproxy.conf
+Restart=on-failure
+RestartSec=3s
+KillSignal=SIGTERM
+TimeoutStopSec=15s
+
+[Install]
+WantedBy=multi-user.target

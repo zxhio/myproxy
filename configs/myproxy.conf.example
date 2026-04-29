@@ -1,0 +1,25 @@
+# myproxy configuration example
+# Lines starting with # are comments. Empty lines are ignored.
+#
+# Usage: myproxy -c /etc/myproxy/myproxy.conf
+
+# --- Global Options ---
+
+# Log level: error, info (default), debug, trace
+# log-level=info
+
+# Log file path (optional, default: terminal only)
+# log-file=/var/log/myproxy/myproxy.log
+
+# Max log file size in MB (default: 10)
+# log-max-size=10
+
+# Number of rotated log files to keep (default: 10)
+# log-max-files=10
+
+# --- Proxy Configurations ---
+# Format: listen_addr,backend_addr
+# Examples:
+
+0.0.0.0:8080,127.0.0.1:8000
+# 0.0.0.0:8081,127.0.0.1:8001
