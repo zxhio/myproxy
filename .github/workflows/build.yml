@@ -41,9 +41,9 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: linux-amd64
+            target: linux-x86_64
           - os: ubuntu-latest
-            target: linux-arm64
+            target: linux-aarch64
           - os: macos-latest
             target: darwin-x86_64
           - os: macos-latest
@@ -60,7 +60,7 @@ jobs:
           sudo apt-get install -y cmake gcc
 
       - name: Install ARM cross-compiler (Ubuntu ARM64)
-        if: matrix.target == 'linux-arm64'
+        if: matrix.target == 'linux-aarch64'
         run: |
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
