@@ -100,7 +100,7 @@ Example:
 2026/03/02 16:21:40 D [CLOSE#4] 192.168.1.100:52341 -> 10.0.0.1:80 (Duration: 3.52s)
 ```
 
-## systemd Deployment
+## systemd Deployment (Linux)
 
 ```bash
 # Install (binary, config, systemd unit)
@@ -114,4 +114,20 @@ sudo ./scripts/install-systemd.sh uninstall --purge
 
 # Dry run
 sudo ./scripts/install-systemd.sh --dry-run
+```
+
+## launchd Deployment (macOS)
+
+```bash
+# Install (binary, config, launchd plist)
+sudo ./scripts/install-launchd.sh --force --load --start
+
+# Uninstall (keep config and logs)
+sudo ./scripts/install-launchd.sh uninstall
+
+# Uninstall (remove everything)
+sudo ./scripts/install-launchd.sh uninstall --purge
+
+# Dry run
+sudo ./scripts/install-launchd.sh --dry-run
 ```

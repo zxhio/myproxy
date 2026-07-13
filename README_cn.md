@@ -100,7 +100,7 @@ YYYY/MM/DD HH:MM:SS L 消息
 2026/03/02 16:21:40 D [CLOSE#4] 192.168.1.100:52341 -> 10.0.0.1:80 (Duration: 3.52s)
 ```
 
-## systemd 部署
+## systemd 部署（Linux）
 
 ```bash
 # 安装（二进制、配置、systemd unit）
@@ -114,4 +114,20 @@ sudo ./scripts/install-systemd.sh uninstall --purge
 
 # 预览操作
 sudo ./scripts/install-systemd.sh --dry-run
+```
+
+## launchd 部署（macOS）
+
+```bash
+# 安装（二进制、配置、launchd plist）
+sudo ./scripts/install-launchd.sh --force --load --start
+
+# 卸载（保留配置和日志）
+sudo ./scripts/install-launchd.sh uninstall
+
+# 卸载（删除所有文件）
+sudo ./scripts/install-launchd.sh uninstall --purge
+
+# 预览操作
+sudo ./scripts/install-launchd.sh --dry-run
 ```

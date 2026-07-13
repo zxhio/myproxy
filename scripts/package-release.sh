@@ -59,8 +59,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -f "${REPO_ROOT}/configs/myproxy.conf.example" ]] || die "missing configs/myproxy.conf.example"
-[[ -f "${REPO_ROOT}/deploy/systemd/myproxy.service" ]] || die "missing deploy/systemd/myproxy.service"
-[[ -f "${REPO_ROOT}/scripts/install-systemd.sh" ]] || die "missing scripts/install-systemd.sh"
+if [[ "${GOOS}" == "darwin" ]]; then
+  [[ -f "${REPO_ROOT}/deploy/launchd/com.myproxy.plist" ]] || die "missing deploy/launchd/com.myproxy.plist"
+  [[ -f "${REPO_ROOT}/scripts/install-launchd.sh" ]] || die "missing scripts/install-launchd.sh"
+else
+  [[ -f "${REPO_ROOT}/deploy/systemd/myproxy.service" ]] || die "missing deploy/systemd/myproxy.service"
+  [[ -f "${REPO_ROOT}/scripts/install-systemd.sh" ]] || die "missing scripts/install-systemd.sh"
+fi
 [[ "${VERSION}" =~ ^[A-Za-z0-9._-]+$ ]] || die "VERSION may only contain letters, numbers, dot, underscore, and dash"
 [[ "${GOOS}" =~ ^[A-Za-z0-9._-]+$ ]] || die "GOOS may only contain letters, numbers, dot, underscore, and dash"
 [[ "${GOARCH}" =~ ^[A-Za-z0-9._-]+$ ]] || die "GOARCH may only contain letters, numbers, dot, underscore, and dash"
@@ -89,22 +94,34 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 PACKAGE_ROOT="${WORK_DIR}/${PACKAGE_NAME}"
 mkdir -p "${PACKAGE_ROOT}/build"
 mkdir -p "${PACKAGE_ROOT}/configs"
-mkdir -p "${PACKAGE_ROOT}/deploy/systemd"
 mkdir -p "${PACKAGE_ROOT}/scripts"
 
 install -m 0755 "${BINARY_SRC}" "${PACKAGE_ROOT}/build/myproxy"
 install -m 0644 "${REPO_ROOT}/configs/myproxy.conf.example" "${PACKAGE_ROOT}/configs/myproxy.conf.example"
-install -m 0644 "${REPO_ROOT}/deploy/systemd/myproxy.service" "${PACKAGE_ROOT}/deploy/systemd/myproxy.service"
-install -m 0755 "${REPO_ROOT}/scripts/install-systemd.sh" "${PACKAGE_ROOT}/scripts/install-systemd.sh"
 install -m 0644 "${REPO_ROOT}/README.md" "${PACKAGE_ROOT}/README.md"
 install -m 0644 "${REPO_ROOT}/README_cn.md" "${PACKAGE_ROOT}/README_cn.md"
 
-cat > "${PACKAGE_ROOT}/RELEASE" <<EOF
+if [[ "${GOOS}" == "darwin" ]]; then
+	mkdir -p "${PACKAGE_ROOT}/deploy/launchd"
+	install -m 0644 "${REPO_ROOT}/deploy/launchd/com.myproxy.plist" "${PACKAGE_ROOT}/deploy/launchd/com.myproxy.plist"
+	install -m 0755 "${REPO_ROOT}/scripts/install-launchd.sh" "${PACKAGE_ROOT}/scripts/install-launchd.sh"
+	cat > "${PACKAGE_ROOT}/RELEASE" <<EOF
+name: ${APP_NAME}
+version: ${VERSION}
+target: ${GOOS}/${GOARCH}
+install: sudo scripts/install-launchd.sh --force --load --start
+EOF
+else
+	mkdir -p "${PACKAGE_ROOT}/deploy/systemd"
+	install -m 0644 "${REPO_ROOT}/deploy/systemd/myproxy.service" "${PACKAGE_ROOT}/deploy/systemd/myproxy.service"
+	install -m 0755 "${REPO_ROOT}/scripts/install-systemd.sh" "${PACKAGE_ROOT}/scripts/install-systemd.sh"
+	cat > "${PACKAGE_ROOT}/RELEASE" <<EOF
 name: ${APP_NAME}
 version: ${VERSION}
 target: ${GOOS}/${GOARCH}
 install: sudo scripts/install-systemd.sh --enable --start
 EOF
+fi
 
 tar -czf "${PACKAGE_PATH}" -C "${WORK_DIR}" "${PACKAGE_NAME}"
 log "created ${PACKAGE_PATH}"
