@@ -256,6 +256,9 @@ struct conn_pair {
     broker_t *bwd;
     int done;
     ev_tstamp start_time;
+    ev_io connect_w;
+    char client_label[32];
+    char backend_label[32];
 };
 
 static void set_nonblock(int fd) { fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK); }
@@ -314,6 +317,7 @@ static void broker_done(broker_t *b)
         return;
 
     double duration = ev_time() - p->start_time;
+    double safe_duration = duration > 0 ? duration : 1e-9;
 
     char fwd_buf[32], fwd_rate_buf[32];
     char bwd_buf[32], bwd_rate_buf[32];
@@ -322,9 +326,11 @@ static void broker_done(broker_t *b)
     LOG_DEBUG(
         "[STATS#%d] FWD: %s (%s/s) | BWD: %s (%s/s)", b->pair->client_fd,
         format_size(fwd_buf, sizeof(fwd_buf), p->fwd->total_write),
-        format_size(fwd_rate_buf, sizeof(fwd_rate_buf), (size_t)(p->fwd->total_write / duration)),
+        format_size(fwd_rate_buf, sizeof(fwd_rate_buf),
+                    (size_t)(p->fwd->total_write / safe_duration)),
         format_size(bwd_buf, sizeof(bwd_buf), p->bwd->total_write),
-        format_size(bwd_rate_buf, sizeof(bwd_rate_buf), (size_t)(p->bwd->total_write / duration)));
+        format_size(bwd_rate_buf, sizeof(bwd_rate_buf),
+                    (size_t)(p->bwd->total_write / safe_duration)));
 
 #ifdef USE_SPLICE
     close(p->fwd->pipe[0]);
@@ -377,7 +383,7 @@ static void broker_on_writable(struct ev_loop *loop, ev_io *w, int revents)
                 ev_io_start(loop, &b->rw);
             }
         }
-    } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+    } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
         LOG_ERROR("[ERROR#%d] %s <- %s WRITE error: %s", b->pair->client_fd, b->to_label,
                   b->from_label, strerror(errno));
         shutdown(b->from_fd, SHUT_RD);
@@ -386,6 +392,35 @@ static void broker_on_writable(struct ev_loop *loop, ev_io *w, int revents)
         ev_io_stop(loop, &b->rw);
         broker_done(b);
     }
+}
+
+static void broker_free(conn_pair_t *p, broker_t *b)
+{
+    if (!b)
+        return;
+
+    ev_io_stop(p->loop, &b->rw);
+    ev_io_stop(p->loop, &b->ww);
+#ifdef USE_SPLICE
+    if (b->pipe[0] >= 0)
+        close(b->pipe[0]);
+    if (b->pipe[1] >= 0)
+        close(b->pipe[1]);
+#endif
+    free(b);
+}
+
+static void conn_pair_cleanup(conn_pair_t *p)
+{
+    if (!p)
+        return;
+
+    ev_io_stop(p->loop, &p->connect_w);
+    broker_free(p, p->fwd);
+    broker_free(p, p->bwd);
+    close(p->client_fd);
+    close(p->backend_fd);
+    free(p);
 }
 
 static void broker_on_readable(struct ev_loop *loop, ev_io *w, int revents)
@@ -465,11 +500,52 @@ static broker_t *broker_new(conn_pair_t *p, int to_fd, int from_fd, int conn_id,
     return b;
 }
 
+static int conn_pair_start_brokers(conn_pair_t *p)
+{
+    p->fwd = broker_new(p, p->backend_fd, p->client_fd, p->client_fd, p->client_label,
+                        p->backend_label);
+    if (!p->fwd)
+        return -1;
+
+    p->bwd = broker_new(p, p->client_fd, p->backend_fd, p->client_fd, p->backend_label,
+                        p->client_label);
+    if (!p->bwd)
+        return -1;
+
+    return 0;
+}
+
+static void conn_pair_on_backend_connected(struct ev_loop *loop, ev_io *w, int revents)
+{
+    (void)revents;
+
+    conn_pair_t *p = (conn_pair_t *)w->data;
+    int err = 0;
+    socklen_t err_len = sizeof(err);
+
+    ev_io_stop(loop, &p->connect_w);
+
+    if (getsockopt(p->backend_fd, SOL_SOCKET, SO_ERROR, &err, &err_len) < 0)
+        err = errno;
+
+    if (err != 0) {
+        LOG_ERROR("Connection to %s failed: %s", p->backend_label, strerror(err));
+        conn_pair_cleanup(p);
+        return;
+    }
+
+    if (conn_pair_start_brokers(p) < 0) {
+        conn_pair_cleanup(p);
+        return;
+    }
+}
+
 // conn_pair_new - Create bidirectional proxy connection between client and backend
 static void conn_pair_new(struct ev_loop *loop, int client_fd, const char *client_ip,
                           int client_port, const char *backend_ip, int backend_port)
 {
     int backend_fd = socket(AF_INET, SOCK_STREAM, 0);
+    int connect_pending = 0;
     if (backend_fd < 0) {
         LOG_ERROR("socket: %s", strerror(errno));
         close(client_fd);
@@ -485,12 +561,14 @@ static void conn_pair_new(struct ev_loop *loop, int client_fd, const char *clien
     backend_addr.sin_port = htons(backend_port);
     inet_pton(AF_INET, backend_ip, &backend_addr.sin_addr);
 
-    if (connect(backend_fd, (struct sockaddr *)&backend_addr, sizeof(backend_addr)) < 0 &&
-        errno != EINPROGRESS) {
-        LOG_ERROR("Connection to %s:%d failed", backend_ip, backend_port);
-        close(client_fd);
-        close(backend_fd);
-        return;
+    if (connect(backend_fd, (struct sockaddr *)&backend_addr, sizeof(backend_addr)) < 0) {
+        if (errno != EINPROGRESS) {
+            LOG_ERROR("Connection to %s:%d failed: %s", backend_ip, backend_port, strerror(errno));
+            close(client_fd);
+            close(backend_fd);
+            return;
+        }
+        connect_pending = 1;
     }
 
     conn_pair_t *p = (conn_pair_t *)calloc(1, sizeof(*p));
@@ -505,41 +583,21 @@ static void conn_pair_new(struct ev_loop *loop, int client_fd, const char *clien
     p->backend_fd = backend_fd;
     p->start_time = ev_time();
 
-    char client_label[32], backend_label[32];
-    snprintf(client_label, sizeof(client_label), "%s:%d", client_ip, client_port);
-    snprintf(backend_label, sizeof(backend_label), "%s:%d", backend_ip, backend_port);
+    snprintf(p->client_label, sizeof(p->client_label), "%s:%d", client_ip, client_port);
+    snprintf(p->backend_label, sizeof(p->backend_label), "%s:%d", backend_ip, backend_port);
 
     // Log connection OPEN
-    LOG_DEBUG("[OPEN#%d] %s -> %s", client_fd, client_label, backend_label);
+    LOG_DEBUG("[OPEN#%d] %s -> %s", client_fd, p->client_label, p->backend_label);
 
-    p->fwd = broker_new(p, backend_fd, client_fd, client_fd, client_label, backend_label);
-    if (!p->fwd)
-        goto cleanup;
-
-    p->bwd = broker_new(p, client_fd, backend_fd, client_fd, backend_label, client_label);
-    if (!p->bwd)
-        goto cleanup;
-
-    return;
-
-cleanup:
-#ifdef USE_SPLICE
-    if (p->fwd) {
-        close(p->fwd->pipe[0]);
-        close(p->fwd->pipe[1]);
+    if (connect_pending) {
+        ev_io_init(&p->connect_w, conn_pair_on_backend_connected, backend_fd, EV_WRITE);
+        p->connect_w.data = p;
+        ev_io_start(loop, &p->connect_w);
+        return;
     }
-    if (p->bwd) {
-        close(p->bwd->pipe[0]);
-        close(p->bwd->pipe[1]);
-    }
-#endif
-    if (p->fwd)
-        free(p->fwd);
-    if (p->bwd)
-        free(p->bwd);
-    free(p);
-    close(client_fd);
-    close(backend_fd);
+
+    if (conn_pair_start_brokers(p) < 0)
+        conn_pair_cleanup(p);
 }
 
 typedef struct {
